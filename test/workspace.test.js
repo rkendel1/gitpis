@@ -5,6 +5,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import { createWasmWorkspace } from '../src/index.js';
 
+const MAX_PORT_DISCOVERY_ATTEMPTS = 30;
+const MAX_HEALTH_CHECK_ATTEMPTS = 30;
+
 async function mkRunningRepo() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gitpis-repo-'));
   const pkg = {
@@ -21,7 +24,7 @@ async function mkRunningRepo() {
     path.join(dir, 'start.js'),
     [
       'console.log("ready: http://localhost:5173")',
-      'setInterval(() => console.log("tick"), 50)',
+      'setInterval(() => console.log("tick"), 250)',
       'process.on("SIGTERM", () => process.exit(0));'
     ].join('\n')
   );
@@ -50,6 +53,9 @@ async function nextLog(asyncIterable, timeoutMs = 3000) {
     asyncIterable.next(),
     new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out waiting for log')), timeoutMs))
   ]);
+  if (item.done) {
+    throw new Error('Log stream ended before emitting a log line');
+  }
   return item.value;
 }
 
@@ -72,13 +78,17 @@ test('runtime launch exposes logs, ports, lifecycle, and mounted filesystem', as
     assert.equal(typeof firstLog, 'string');
     await logStream.return();
 
-    for (let i = 0; i < 30; i += 1) {
+    let discovered5173 = false;
+    for (let i = 0; i < MAX_PORT_DISCOVERY_ATTEMPTS; i += 1) {
       const ports = await runtime.ports(ws.id);
       if (ports.some((port) => port.port === 5173)) {
+        discovered5173 = true;
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+
+    assert.ok(discovered5173, 'expected runtime to discover port 5173');
 
     const ports = await runtime.ports(ws.id);
     assert.ok(ports.some((port) => port.port === 3000));
@@ -123,7 +133,7 @@ test('runtime failure transitions workspace to failed state', async () => {
   try {
     ws = await runtime.launch(repo);
 
-    for (let i = 0; i < 30; i += 1) {
+    for (let i = 0; i < MAX_HEALTH_CHECK_ATTEMPTS; i += 1) {
       if ((await runtime.health(ws.id)) === 'failed') {
         break;
       }

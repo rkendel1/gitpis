@@ -6,6 +6,28 @@ import { WorkspaceFileSystem } from './filesystem.js';
 const COMPATIBLE_FRAMEWORKS = ['node', 'rust', 'go', 'python', 'static', 'vite', 'react', 'vue', 'svelte', 'nextjs'];
 const DEFAULT_RESOURCE_LIMITS = { memoryMb: 512, cpuPercent: 100, maxProcesses: 10 };
 const COMMON_PORTS = new Set([3000, 4173, 5000, 5173, 8000, 8080]);
+const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 1500;
+const SAFE_ENV_KEYS = ['PATH', 'HOME', 'USER', 'SHELL', 'TMPDIR', 'TEMP', 'TMP', 'PWD', 'NODE_ENV', 'TERM', 'CI'];
+const MAX_LOG_BUFFER_SIZE = 500;
+const DEFAULT_LOG_LIMIT = 200;
+
+function createRuntimeEnv(extra = {}) {
+  const env = {};
+
+  for (const key of SAFE_ENV_KEYS) {
+    if (process.env[key] !== undefined) {
+      env[key] = process.env[key];
+    }
+  }
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if ((key.startsWith('npm_') || key.startsWith('NPM_')) && value !== undefined) {
+      env[key] = value;
+    }
+  }
+
+  return { ...env, ...extra };
+}
 
 function createLogLine(prefix, line) {
   const text = line.trim();
@@ -14,13 +36,14 @@ function createLogLine(prefix, line) {
 }
 
 function parsePorts(line) {
-  const matches = line.match(/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})|\b(\d{4,5})\b/g) ?? [];
+  const matcher = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{1,5})|(?:port|listen(?:ing)?|on)\s*[:=]?\s*(\d{1,5})/gi;
   const ports = [];
 
-  for (const token of matches) {
-    const digits = Number(token.replace(/\D+/g, ''));
-    if (Number.isInteger(digits) && digits > 0 && digits < 65536) {
-      ports.push(digits);
+  for (const match of line.matchAll(matcher)) {
+    const candidate = match[1] ?? match[2];
+    const portNumber = Number(candidate);
+    if (Number.isInteger(portNumber) && portNumber > 0 && portNumber < 65536) {
+      ports.push(portNumber);
     }
   }
 
@@ -50,13 +73,13 @@ async function runAndCapture(command, cwd, onLog, env) {
   pipe(child.stdout, 'build');
   pipe(child.stderr, 'build');
 
-  return await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     child.on('error', reject);
     child.on('close', (code) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`Build failed: ${command}`));
+        reject(new Error(`Build failed with code ${code}: ${command}`));
       }
     });
   });
@@ -76,7 +99,7 @@ class WasmtimeRuntimeInstance {
     this.stopping = false;
     this.logEmitter = new EventEmitter();
     this.logBuffer = [];
-    this.maxLogLines = 500;
+    this.maxLogLines = MAX_LOG_BUFFER_SIZE;
     this.onEvent = artifact.onEvent ?? (() => {});
     this.onHealth = artifact.onHealth ?? (() => {});
     this.onPort = artifact.onPort ?? (() => {});
@@ -100,7 +123,7 @@ class WasmtimeRuntimeInstance {
     try {
       if (this.buildCommand && this.buildCommand !== 'none') {
         this.#emitLog(`[workspace] build: ${this.buildCommand}`);
-        await runAndCapture(this.buildCommand, this.mountPath, (line) => this.#emitLog(line), process.env);
+        await runAndCapture(this.buildCommand, this.mountPath, (line) => this.#emitLog(line), createRuntimeEnv());
       }
 
       if (!this.startCommand || this.startCommand === 'serve static assets') {
@@ -109,10 +132,9 @@ class WasmtimeRuntimeInstance {
         return;
       }
 
-      const child = spawnShell(this.startCommand, this.mountPath, {
-        ...process.env,
+      const child = spawnShell(this.startCommand, this.mountPath, createRuntimeEnv({
         PORT: String(this.defaultPort ?? 8080)
-      });
+      }));
       this.process = child;
       this.stopping = false;
 
@@ -164,6 +186,24 @@ class WasmtimeRuntimeInstance {
     }
   }
 
+  #killProcessOrGroup(signal) {
+    if (!this.process) {
+      return;
+    }
+
+    if (this.process.pid) {
+      try {
+        // Negative PID targets the whole process group to terminate spawned children too.
+        process.kill(-this.process.pid, signal);
+      } catch {
+        this.process.kill(signal);
+      }
+      return;
+    }
+
+    this.process.kill(signal);
+  }
+
   async stop() {
     this.stopping = true;
     if (!this.process) {
@@ -172,26 +212,14 @@ class WasmtimeRuntimeInstance {
       return;
     }
 
-    if (this.process.pid) {
-      try {
-        process.kill(-this.process.pid, 'SIGTERM');
-      } catch {
-        this.process.kill('SIGTERM');
-      }
-    } else {
-      this.process.kill('SIGTERM');
-    }
+    this.#killProcessOrGroup('SIGTERM');
 
     await new Promise((resolve) => {
       const timeout = setTimeout(() => {
         if (this.process) {
-          try {
-            process.kill(-this.process.pid, 'SIGKILL');
-          } catch {
-            this.process.kill('SIGKILL');
-          }
+          this.#killProcessOrGroup('SIGKILL');
         }
-      }, 1500);
+      }, GRACEFUL_SHUTDOWN_TIMEOUT_MS);
 
       const done = () => {
         clearTimeout(timeout);
@@ -223,8 +251,12 @@ class WasmtimeRuntimeInstance {
     }
   }
 
-  getRecentLogs(limit = 200) {
-    return this.logBuffer.slice(-Math.max(1, limit));
+  getRecentLogs(limit = DEFAULT_LOG_LIMIT) {
+    const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : DEFAULT_LOG_LIMIT;
+    if (safeLimit === 0) {
+      return [];
+    }
+    return this.logBuffer.slice(-safeLimit);
   }
 
   async ports() {

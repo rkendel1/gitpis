@@ -6,6 +6,9 @@ import { detectFramework, generateExecutionPlan } from './frameworkDetector.js';
 import { RuntimeProviderRegistry, WasmtimeProvider, defaultRuntimeCandidates, defaultResourceLimits } from './providers.js';
 
 const WORKSPACE_BASE = path.resolve('.wasm-workspaces');
+const RUNTIME_DIR = 'runtime';
+const WORKSPACE_DIR = 'workspace';
+const MAX_EVENT_HISTORY = 500;
 
 export const WorkspaceStatus = {
   Starting: 'starting',
@@ -29,7 +32,7 @@ export class InMemoryWasmWorkspace {
 
   async launch(repoUrl) {
     const id = randomUUID();
-    const workspaceRoot = path.join(this.workspaceBase, id, 'runtime', 'workspace');
+    const workspaceRoot = path.join(this.workspaceBase, id, RUNTIME_DIR, WORKSPACE_DIR);
 
     await fs.mkdir(path.dirname(workspaceRoot), { recursive: true });
     const repoPath = await cloneRepository(repoUrl, workspaceRoot);
@@ -178,7 +181,7 @@ export class InMemoryWasmWorkspace {
     };
 
     events.push(event);
-    if (events.length > 500) {
+    if (events.length > MAX_EVENT_HISTORY) {
       events.shift();
     }
   }

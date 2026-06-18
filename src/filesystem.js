@@ -1,6 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+function normalizeSandboxPath(value) {
+  if (process.platform === 'win32') {
+    return value.toLowerCase();
+  }
+  return value;
+}
+
 export class WorkspaceFileSystem {
   constructor(rootDir) {
     this.rootDir = path.resolve(rootDir);
@@ -8,8 +15,10 @@ export class WorkspaceFileSystem {
 
   resolve(userPath = '.') {
     const resolved = path.resolve(this.rootDir, userPath);
-    const rootWithSep = `${this.rootDir}${path.sep}`;
-    if (resolved !== this.rootDir && !resolved.startsWith(rootWithSep)) {
+    const normalizedRoot = normalizeSandboxPath(this.rootDir);
+    const normalizedResolved = normalizeSandboxPath(resolved);
+    const rootWithSep = `${normalizedRoot}${path.sep}`;
+    if (normalizedResolved !== normalizedRoot && !normalizedResolved.startsWith(rootWithSep)) {
       throw new Error('Path escapes workspace sandbox');
     }
     return resolved;
