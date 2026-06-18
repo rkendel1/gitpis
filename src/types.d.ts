@@ -6,6 +6,110 @@ export interface PortInfo {
   route?: string;
 }
 
+export interface RouteTarget {
+  nodeId: string;
+  workspaceId: string;
+  runtimeAddress: string;
+}
+
+export interface Route {
+  id: string;
+  workspaceId: string;
+  port: number;
+  host: string;
+  protocol: 'http' | 'https';
+  url: string;
+  target: RouteTarget;
+  websocket?: boolean;
+  sse?: boolean;
+  createdAt?: string;
+}
+
+export interface IngressPolicy {
+  allowIngress: boolean;
+}
+
+export interface EgressPolicy {
+  allowedHosts: string[];
+  blockedHosts: string[];
+  rateLimitPerMinute?: number | null;
+  internetAccess?: 'open' | 'restricted' | 'blocked';
+}
+
+export interface WorkspaceNetwork {
+  workspaceId: string;
+  ports: PortInfo[];
+  routes: Route[];
+  ingressPolicy: IngressPolicy;
+  egressPolicy: EgressPolicy;
+}
+
+export interface NetworkingManager {
+  allocateRoute(workspaceId: string, port: number): Promise<Route>;
+  releaseRoute(workspaceId: string, routeId?: string): Promise<void>;
+  discoverPorts(workspaceId: string, runtime: RuntimeInstance): Promise<PortInfo[]>;
+}
+
+export interface PortDiscoveryService {
+  discover(runtime: RuntimeInstance): Promise<PortInfo[]>;
+}
+
+export interface PortRegistry {
+  register(workspaceId: string, port: number): Promise<{ workspaceId: string; port: number }>;
+}
+
+export interface UrlGenerator {
+  generate(workspaceId: string, port: number): string;
+}
+
+export interface RouteAllocator {
+  allocate(workspaceId: string, port: number): Promise<Route>;
+}
+
+export interface ReverseProxyProvider {
+  registerRoute(route: Route): Promise<void>;
+  removeRoute(routeId: string): Promise<void>;
+}
+
+export interface TlsProvider {
+  issueCertificate(domain: string): unknown;
+  renewCertificate(domain: string): unknown;
+  revokeCertificate(domain: string): void;
+}
+
+export interface CustomDomainManager {
+  addDomain(workspaceId: string, domain: string, routeId?: string | null): unknown;
+  verifyDomain(domain: string): unknown;
+  removeDomain(domain: string): void;
+}
+
+export interface NetworkIsolationPolicy {
+  allowIngress(): boolean;
+  allowEgress(host: string): boolean;
+  allowWorkspaceToWorkspace(sourceWorkspaceId: string, targetWorkspaceId: string): boolean;
+}
+
+export interface ServiceMeshProvider {
+  registerService(name: string, target: string): void;
+  discoverService(name: string): string | null;
+}
+
+export interface EventStream {
+  subscribe(): Iterable<WorkspaceEvent>;
+}
+
+export interface RouteHealthChecker {
+  check(route: Route): Promise<{
+    routeId: string;
+    workspaceId: string;
+    portResponding: boolean;
+    http200: boolean;
+    runtimeReachable: boolean;
+    proxyReachable: boolean;
+    checkedAt: string;
+  }>;
+}
+
 export interface FileSystem {
   readFile(path: string, encoding?: BufferEncoding): Promise<string | Buffer>;
   writeFile(path: string, content: string | Buffer): Promise<void>;
@@ -57,6 +161,14 @@ export interface WasmWorkspace {
   events(id: string): Promise<WorkspaceEvent[]>;
   filesystem(id: string): Promise<FileSystem>;
   ports(id: string): Promise<PortInfo[]>;
+  routes(id: string): Promise<Route[]>;
+  createRoute(id: string, port?: number): Promise<Route>;
+  deleteRoute(id: string, routeId: string): Promise<void>;
+  workspaceNetwork(id: string): Promise<WorkspaceNetwork>;
+  workspaceUrl(id: string): Promise<string | null>;
+  workspaceDomains(id: string): Promise<unknown[]>;
+  networkRoutes(): Promise<Route[]>;
+  networkStats(): Promise<Record<string, number>>;
   health(id: string): Promise<WorkspaceHealth>;
 }
 

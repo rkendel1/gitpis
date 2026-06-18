@@ -6,6 +6,7 @@ import { detectFramework, generateExecutionPlan } from './frameworkDetector.js';
 import { RuntimeProviderRegistry, NodeRuntimeProvider, WasmtimeProvider, defaultRuntimeCandidates, defaultResourceLimits } from './providers.js';
 import { WorkspaceFileSystem } from './filesystem.js';
 import { FilesystemJournal, LocalSnapshotStorageProvider, SnapshotEngine } from './persistence.js';
+import { NetworkingManager } from './networking.js';
 
 const WORKSPACE_BASE = path.resolve('.wasm-workspaces');
 const RUNTIME_DIR = 'runtime';
@@ -38,6 +39,9 @@ export class InMemoryWasmWorkspace {
     this.runtimeCandidates = defaultRuntimeCandidates();
     this.resourceLimits = options.resourceLimits ?? defaultResourceLimits();
     this.workspaceJournals = new Map();
+    this.networkingManager = options.networkingManager ?? new NetworkingManager({
+      baseDomain: options.baseDomain
+    });
     const snapshotStorageProvider = options.snapshotStorageProvider ?? new LocalSnapshotStorageProvider({
       baseDir: path.join(this.workspaceBase, SNAPSHOT_ROOT_DIR)
     });
@@ -95,6 +99,9 @@ export class InMemoryWasmWorkspace {
       },
       onPort: (port) => {
         this.#recordEvent(id, 'PortDiscovered', { id, ...port });
+        this.#syncRoutesForWorkspace(id).catch((error) => {
+          this.#recordEvent(id, 'RouteSyncFailed', { id, reason: error.message });
+        });
       }
     });
 
@@ -109,6 +116,7 @@ export class InMemoryWasmWorkspace {
       await runtime.start();
       workspace.status = await runtime.health();
       workspace.health = workspace.status;
+      await this.#syncRoutesForWorkspace(id);
     } catch (error) {
       workspace.status = WorkspaceStatus.Failed;
       workspace.health = WorkspaceStatus.Failed;
@@ -123,6 +131,7 @@ export class InMemoryWasmWorkspace {
     const ws = this.#mustGetWorkspace(id);
     const runtime = this.#mustGetRuntime(id);
     await runtime.stop();
+    await this.networkingManager.releaseRoute(id);
     ws.status = WorkspaceStatus.Stopped;
     ws.health = WorkspaceStatus.Stopped;
     this.#recordEvent(id, 'WorkspaceStopped', { id });
@@ -171,7 +180,9 @@ export class InMemoryWasmWorkspace {
   async ports(id) {
     this.#mustGetWorkspace(id);
     const runtime = this.runtimeInstances.get(id);
-    return runtime ? runtime.ports() : [];
+    const ports = runtime ? await runtime.ports() : [];
+    await this.#syncRoutesForWorkspace(id, ports);
+    return ports;
   }
 
   list() {
@@ -202,6 +213,7 @@ export class InMemoryWasmWorkspace {
           reason: error.message
         });
       }
+
     }
     const runtimePorts = runtime ? await runtime.ports().catch(() => []) : [];
     const snapshot = await this.snapshotEngine.create(id, {
@@ -265,7 +277,12 @@ export class InMemoryWasmWorkspace {
         ws.health = nextStatus;
         ws.status = nextStatus;
       },
-      onPort: (port) => this.#recordEvent(id, 'PortDiscovered', { id, ...port })
+      onPort: (port) => {
+        this.#recordEvent(id, 'PortDiscovered', { id, ...port });
+        this.#syncRoutesForWorkspace(id).catch((error) => {
+          this.#recordEvent(id, 'RouteSyncFailed', { id, reason: error.message });
+        });
+      }
     });
 
     ws.runtime = artifact.runtime;
@@ -278,6 +295,7 @@ export class InMemoryWasmWorkspace {
     await runtime.start();
     ws.status = await runtime.health();
     ws.health = ws.status;
+    await this.#syncRoutesForWorkspace(id);
     this.#recordEvent(id, 'WorkspaceResumed', { id, snapshotId: ws.latestSnapshotId ?? null });
     return ws;
   }
@@ -310,6 +328,53 @@ export class InMemoryWasmWorkspace {
       cacheSizeGb: 0,
       ...stats
     };
+  }
+
+  async routes(id) {
+    this.#mustGetWorkspace(id);
+    await this.#syncRoutesForWorkspace(id);
+    return this.networkingManager.routes(id);
+  }
+
+  async createRoute(id, port) {
+    this.#mustGetWorkspace(id);
+    const runtime = this.runtimeInstances.get(id);
+    const ports = runtime ? await runtime.ports() : [];
+    const selectedPort = Number(port ?? ports[0]?.port ?? 0);
+    if (!selectedPort) {
+      throw new Error(`No port available for workspace: ${id}`);
+    }
+    return this.networkingManager.allocateRoute(id, selectedPort);
+  }
+
+  async deleteRoute(id, routeId) {
+    this.#mustGetWorkspace(id);
+    await this.networkingManager.releaseRoute(id, routeId);
+  }
+
+  async networkRoutes() {
+    return this.networkingManager.allRoutes();
+  }
+
+  async networkStats() {
+    return this.networkingManager.stats();
+  }
+
+  async workspaceNetwork(id) {
+    this.#mustGetWorkspace(id);
+    const runtime = this.runtimeInstances.get(id);
+    return this.networkingManager.workspaceNetwork(id, runtime);
+  }
+
+  async workspaceUrl(id) {
+    this.#mustGetWorkspace(id);
+    await this.#syncRoutesForWorkspace(id);
+    return this.networkingManager.url(id);
+  }
+
+  async workspaceDomains(id) {
+    this.#mustGetWorkspace(id);
+    return this.networkingManager.domains(id);
   }
 
   #mustGetWorkspace(id) {
@@ -355,6 +420,14 @@ export class InMemoryWasmWorkspace {
     events.push(event);
     if (events.length > MAX_EVENT_HISTORY) {
       events.shift();
+    }
+  }
+
+  async #syncRoutesForWorkspace(id, providedPorts) {
+    const runtime = this.runtimeInstances.get(id);
+    const ports = providedPorts ?? (runtime ? await runtime.ports() : []);
+    for (const portInfo of ports) {
+      await this.networkingManager.allocateRoute(id, portInfo.port);
     }
   }
 }

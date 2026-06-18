@@ -59,6 +59,18 @@ npm run start:cli -- resume <workspaceId>
 - `POST /workspaces/:id/stop`
 - `POST /workspaces/:id/restart`
 - `GET /workspaces/:id/ports`
+- `GET /workspaces/:id/routes`
+- `POST /workspaces/:id/routes` with `{ "port": 5173 }`
+- `DELETE /workspaces/:id/routes/:routeId`
+- `GET /workspaces/:id/network`
 - `GET /workspaces/:id/health`
 - `GET /workspaces/:id/logs`
 - `GET /workspaces/:id/events`
+- `GET /network/routes`
+- `GET /network/stats`
+
+## CLI
+
+- `gitpis workspace routes <workspaceId>`
+- `gitpis workspace url <workspaceId>`
+- `gitpis workspace domains <workspaceId>`
