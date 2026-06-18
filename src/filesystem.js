@@ -9,8 +9,9 @@ function normalizeSandboxPath(value) {
 }
 
 export class WorkspaceFileSystem {
-  constructor(rootDir) {
+  constructor(rootDir, options = {}) {
     this.rootDir = path.resolve(rootDir);
+    this.journal = options.journal;
   }
 
   resolve(userPath = '.') {
@@ -32,14 +33,17 @@ export class WorkspaceFileSystem {
     const resolved = this.resolve(filePath);
     await fs.mkdir(path.dirname(resolved), { recursive: true });
     await fs.writeFile(resolved, content);
+    this.journal?.recordChange?.('modify', filePath);
   }
 
   async mkdir(dirPath) {
     await fs.mkdir(this.resolve(dirPath), { recursive: true });
+    this.journal?.recordChange?.('create', dirPath);
   }
 
   async remove(targetPath) {
     await fs.rm(this.resolve(targetPath), { recursive: true, force: true });
+    this.journal?.recordChange?.('delete', targetPath);
   }
 
   async list(dir = '.') {

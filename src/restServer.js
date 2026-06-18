@@ -34,7 +34,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const match = req.url?.match(/^\/workspaces\/([^/]+)(?:\/(stop|restart|ports|health|logs|events))?$/);
+    const restoreMatch = req.url?.match(/^\/workspaces\/([^/]+)\/restore\/([^/]+)$/);
+    if (restoreMatch && req.method === 'POST') {
+      const [, id, snapshotId] = restoreMatch;
+      const restored = await workspace.restore(id, snapshotId);
+      json(res, 200, restored);
+      return;
+    }
+
+    const match = req.url?.match(/^\/workspaces\/([^/]+)(?:\/(stop|restart|ports|health|logs|events|snapshot|suspend|resume|snapshots))?$/);
     if (match) {
       const [, id, action] = match;
 
@@ -80,6 +88,30 @@ const server = http.createServer(async (req, res) => {
       if (action === 'events' && req.method === 'GET') {
         const events = await workspace.events(id);
         json(res, 200, events);
+        return;
+      }
+
+      if (action === 'snapshot' && req.method === 'POST') {
+        const snapshot = await workspace.snapshot(id);
+        json(res, 201, snapshot);
+        return;
+      }
+
+      if (action === 'suspend' && req.method === 'POST') {
+        const suspended = await workspace.suspend(id);
+        json(res, 200, suspended);
+        return;
+      }
+
+      if (action === 'resume' && req.method === 'POST') {
+        const resumed = await workspace.resume(id);
+        json(res, 200, resumed);
+        return;
+      }
+
+      if (action === 'snapshots' && req.method === 'GET') {
+        const snapshots = await workspace.listSnapshots(id);
+        json(res, 200, snapshots);
         return;
       }
     }

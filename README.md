@@ -25,6 +25,11 @@ interface WasmWorkspace {
   launch(repoUrl: string): Promise<Workspace>;
   stop(id: string): Promise<void>;
   restart(id: string): Promise<Workspace>;
+  snapshot(id: string): Promise<Snapshot>;
+  suspend(id: string): Promise<Workspace>;
+  resume(id: string): Promise<Workspace>;
+  restore(id: string, snapshotId: string): Promise<Workspace>;
+  listSnapshots(id: string): Promise<Snapshot[]>;
   logs(id: string): AsyncIterable<string>;
   getLogs(id: string, limit?: number): string[];
   events(id: string): Promise<WorkspaceEvent[]>;
@@ -40,6 +45,9 @@ interface WasmWorkspace {
 npm test
 npm run start:api
 npm run start:cli -- launch https://github.com/user/project.git
+npm run start:cli -- snapshot <workspaceId>
+npm run start:cli -- suspend <workspaceId>
+npm run start:cli -- resume <workspaceId>
 ```
 
 ## REST API
