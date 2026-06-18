@@ -54,7 +54,7 @@ test('NodeRuntimeProvider builds lockfile-aware commands', async () => {
     assert.equal(artifact.runtime, 'node-wasm');
     assert.equal(artifact.packageManager, PackageManager.Yarn);
     assert.equal(artifact.installCommand, 'yarn install --frozen-lockfile');
-    assert.equal(artifact.buildCommand, 'yarn run build');
+    assert.equal(artifact.buildCommand, 'none');
     assert.match(artifact.startCommand, /yarn run dev/);
   } finally {
     await fs.rm(repo, { recursive: true, force: true });

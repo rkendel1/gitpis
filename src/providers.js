@@ -25,11 +25,11 @@ const PACKAGE_MANAGER_LOCKFILES = [
 ];
 
 const FRAMEWORK_PROFILES = {
-  react: { install: true, build: 'build', start: 'dev', defaultPort: 5173, hostFlag: '-- --host 0.0.0.0' },
-  vite: { install: true, build: 'build', start: 'dev', defaultPort: 5173, hostFlag: '-- --host 0.0.0.0' },
-  vue: { install: true, build: 'build', start: 'dev', defaultPort: 5173, hostFlag: '-- --host 0.0.0.0' },
-  svelte: { install: true, build: 'build', start: 'dev', defaultPort: 5173, hostFlag: '-- --host 0.0.0.0' },
-  nextjs: { install: true, build: 'build', start: 'dev', defaultPort: 3000, hostFlag: '' },
+  react: { install: true, build: null, start: 'dev', defaultPort: 5173, hostFlag: '-- --host 0.0.0.0' },
+  vite: { install: true, build: null, start: 'dev', defaultPort: 5173, hostFlag: '-- --host 0.0.0.0' },
+  vue: { install: true, build: null, start: 'dev', defaultPort: 5173, hostFlag: '-- --host 0.0.0.0' },
+  svelte: { install: true, build: null, start: 'dev', defaultPort: 5173, hostFlag: '-- --host 0.0.0.0' },
+  nextjs: { install: true, build: null, start: 'dev', defaultPort: 3000, hostFlag: '' },
   express: { install: true, build: 'build', start: 'start', defaultPort: 3000, hostFlag: '' },
   nestjs: { install: true, build: 'build', start: 'start', defaultPort: 3000, hostFlag: '' },
   node: { install: true, build: 'build', start: 'start', defaultPort: 3000, hostFlag: '' }
@@ -649,7 +649,7 @@ export class NodeRuntimeProvider {
     const packageJson = await readPackageJson(repository.path);
     const scripts = packageJson?.scripts ?? {};
     const profile = FRAMEWORK_PROFILES[repository.framework] ?? FRAMEWORK_PROFILES.node;
-    const hasBuildScript = Boolean(scripts.build);
+    const hasBuildScript = Boolean(profile.build && scripts[profile.build]);
     const hasStartScript = Boolean(scripts[profile.start]);
     const lockfileAware = await isLockfileAwareInstall(packageManager, repository.path, repository.topLevelFiles ?? []);
     const environment = {
@@ -667,7 +667,7 @@ export class NodeRuntimeProvider {
       packageManager,
       dependencyHash: await createDependencyHash(repository.path),
       installCommand: installCommandFor(packageManager, lockfileAware),
-      buildCommand: hasBuildScript ? scriptCommandFor(packageManager, 'build') : 'none',
+      buildCommand: hasBuildScript ? scriptCommandFor(packageManager, profile.build) : 'none',
       startCommand: scriptCommandFor(packageManager, profile.start, profile.hostFlag ?? ''),
       mountPath: repository.path,
       defaultPort: repository.executionPlan?.defaultPort ?? profile.defaultPort,
