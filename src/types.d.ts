@@ -15,7 +15,7 @@ export interface FileSystem {
   snapshot(snapshotPath: string): Promise<string>;
 }
 
-export type WorkspaceHealth = 'starting' | 'running' | 'unhealthy' | 'stopped' | 'failed';
+export type WorkspaceHealth = 'starting' | 'installing' | 'building' | 'running' | 'unhealthy' | 'stopped' | 'failed';
 
 export interface ResourceLimits {
   memoryMb: number;
@@ -93,4 +93,38 @@ export interface RuntimeProvider {
   canRun(repo: RepositoryAnalysis): boolean;
   build(repo: Repository): Promise<BuildArtifact>;
   execute(artifact: BuildArtifact): Promise<RuntimeInstance>;
+}
+
+export interface RuntimeCandidate {
+  name: string;
+  supportsNodeApis: boolean;
+  supportsNpm: boolean;
+  supportsNetworking: boolean;
+  supportsFilesystem: boolean;
+  supportsLongRunningProcesses: boolean;
+  supportsDevServers: boolean;
+  maturityScore: number;
+}
+
+export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
+
+export interface DependencyInstaller {
+  install(workspace: Workspace): Promise<{ cacheHit: boolean; hash: string; command: string | null }>;
+}
+
+export interface DependencyCache {
+  get(hash: string): Promise<{ hash: string; path: string } | null>;
+  put(hash: string, workspacePath: string): Promise<void>;
+}
+
+export interface EnvironmentProvider {
+  get(workspaceId: string): Record<string, string>;
+}
+
+export interface NodeProcess {
+  pid: string;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  restart(): Promise<void>;
+  health(): Promise<WorkspaceHealth>;
 }

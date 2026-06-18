@@ -7,6 +7,8 @@ A Gitpod-compatible WebAssembly workspace execution foundation that launches rep
 - WASM-oriented workspace engine (`InMemoryWasmWorkspace`) with lifecycle APIs.
 - Repository cloning/ingestion and analysis subsystem.
 - Framework detection and execution-plan generation.
+- Node.js runtime provider with package-manager auto-detection (`npm`, `pnpm`, `yarn`; `bun` detection stubbed for future support).
+- Dependency installation orchestration with lockfile-aware commands and local dependency cache.
 - Sandboxed virtual filesystem wrapper.
 - Port and virtual networking metadata layer.
 - Real process-backed Wasmtime runtime provider with lifecycle, health, logs, and port discovery.

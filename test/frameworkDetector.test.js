@@ -40,3 +40,27 @@ test('execution plan includes default port', () => {
   assert.equal(plan.defaultPort, 5173);
   assert.match(plan.start, /npm run dev/);
 });
+
+test('detects express via package.json dependency', async () => {
+  const repo = await mkTempRepo({
+    'package.json': JSON.stringify({
+      name: 'express-app',
+      dependencies: {
+        express: '^5.0.0'
+      }
+    })
+  });
+
+  try {
+    const framework = await detectFramework(repo);
+    assert.equal(framework, 'express');
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
+test('nextjs execution plan launches dev server', () => {
+  const plan = generateExecutionPlan('nextjs');
+  assert.equal(plan.defaultPort, 3000);
+  assert.equal(plan.start, 'npm run dev');
+});

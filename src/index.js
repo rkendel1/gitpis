@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { cloneRepository, analyzeRepository } from './repository.js';
 import { detectFramework, generateExecutionPlan } from './frameworkDetector.js';
-import { RuntimeProviderRegistry, WasmtimeProvider, defaultRuntimeCandidates, defaultResourceLimits } from './providers.js';
+import { RuntimeProviderRegistry, NodeRuntimeProvider, WasmtimeProvider, defaultRuntimeCandidates, defaultResourceLimits } from './providers.js';
 
 const WORKSPACE_BASE = path.resolve('.wasm-workspaces');
 const RUNTIME_DIR = 'runtime';
@@ -12,6 +12,8 @@ const MAX_EVENT_HISTORY = 500;
 
 export const WorkspaceStatus = {
   Starting: 'starting',
+  Installing: 'installing',
+  Building: 'building',
   Running: 'running',
   Unhealthy: 'unhealthy',
   Stopped: 'stopped',
@@ -25,6 +27,7 @@ export class InMemoryWasmWorkspace {
     this.runtimeInstances = new Map();
     this.workspaceEvents = new Map();
     this.registry = new RuntimeProviderRegistry();
+    this.registry.register(new NodeRuntimeProvider());
     this.registry.register(new WasmtimeProvider());
     this.runtimeCandidates = defaultRuntimeCandidates();
     this.resourceLimits = options.resourceLimits ?? defaultResourceLimits();
