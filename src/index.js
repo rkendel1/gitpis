@@ -4,17 +4,22 @@ import { randomUUID } from 'node:crypto';
 import { cloneRepository, analyzeRepository } from './repository.js';
 import { detectFramework, generateExecutionPlan } from './frameworkDetector.js';
 import { RuntimeProviderRegistry, NodeRuntimeProvider, WasmtimeProvider, defaultRuntimeCandidates, defaultResourceLimits } from './providers.js';
+import { WorkspaceFileSystem } from './filesystem.js';
+import { FilesystemJournal, LocalSnapshotStorageProvider, SnapshotEngine } from './persistence.js';
 
 const WORKSPACE_BASE = path.resolve('.wasm-workspaces');
 const RUNTIME_DIR = 'runtime';
 const WORKSPACE_DIR = 'workspace';
 const MAX_EVENT_HISTORY = 500;
+const SNAPSHOT_ROOT_DIR = '.snapshots';
 
 export const WorkspaceStatus = {
   Starting: 'starting',
   Installing: 'installing',
   Building: 'building',
   Running: 'running',
+  Suspended: 'suspended',
+  Restoring: 'restoring',
   Unhealthy: 'unhealthy',
   Stopped: 'stopped',
   Failed: 'failed'
@@ -32,6 +37,14 @@ export class InMemoryWasmWorkspace {
     this.registry.register(new WasmtimeProvider());
     this.runtimeCandidates = defaultRuntimeCandidates();
     this.resourceLimits = options.resourceLimits ?? defaultResourceLimits();
+    this.workspaceJournals = new Map();
+    const snapshotStorageProvider = options.snapshotStorageProvider ?? new LocalSnapshotStorageProvider({
+      baseDir: path.join(this.workspaceBase, SNAPSHOT_ROOT_DIR)
+    });
+    this.snapshotEngine = options.snapshotEngine ?? new SnapshotEngine({
+      storageProvider: snapshotStorageProvider,
+      compression: options.snapshotCompression ?? 'zstd'
+    });
   }
 
   async launch(repoUrl) {
@@ -60,10 +73,13 @@ export class InMemoryWasmWorkspace {
       status: WorkspaceStatus.Starting,
       createdAt: new Date().toISOString(),
       health: WorkspaceStatus.Starting,
-      resourceLimits: { ...this.resourceLimits }
+      resourceLimits: { ...this.resourceLimits },
+      environmentVariables: {},
+      latestSnapshotId: null
     };
 
     this.workspaces.set(id, workspace);
+    this.workspaceJournals.set(id, new FilesystemJournal());
     this.workspaceEvents.set(id, []);
     this.#recordEvent(id, 'WorkspaceCreated', { id });
 
@@ -83,6 +99,9 @@ export class InMemoryWasmWorkspace {
     });
 
     workspace.runtime = artifact.runtime;
+    workspace.packageManager = artifact.packageManager;
+    workspace.dependencyHash = artifact.dependencyHash ?? artifact.dependencyFingerprint ?? '';
+    workspace.environmentVariables = { ...(artifact.environment ?? {}) };
     const runtime = await provider.execute(artifact);
     this.runtimeInstances.set(id, runtime);
 
@@ -102,8 +121,10 @@ export class InMemoryWasmWorkspace {
 
   async stop(id) {
     const ws = this.#mustGetWorkspace(id);
-    const runtime = this.#mustGetRuntime(id);
-    await runtime.stop();
+    const runtime = this.runtimeInstances.get(id);
+    if (runtime) {
+      await runtime.stop();
+    }
     ws.status = WorkspaceStatus.Stopped;
     ws.health = WorkspaceStatus.Stopped;
     this.#recordEvent(id, 'WorkspaceStopped', { id });
@@ -111,22 +132,31 @@ export class InMemoryWasmWorkspace {
 
   async restart(id) {
     const ws = this.#mustGetWorkspace(id);
-    const runtime = this.#mustGetRuntime(id);
-    await runtime.restart();
-    ws.status = await runtime.health();
-    ws.health = ws.status;
+    const runtime = this.runtimeInstances.get(id);
+    if (runtime) {
+      await runtime.restart();
+      ws.status = await runtime.health();
+      ws.health = ws.status;
+    } else {
+      await this.resume(id);
+    }
     this.#recordEvent(id, 'WorkspaceRestarted', { id });
     return ws;
   }
 
   logs(id) {
     this.#mustGetWorkspace(id);
-    return this.#mustGetRuntime(id).logs();
+    const runtime = this.runtimeInstances.get(id);
+    if (!runtime) {
+      return (async function *empty() {})();
+    }
+    return runtime.logs();
   }
 
   getLogs(id, limit = 200) {
     this.#mustGetWorkspace(id);
-    return this.#mustGetRuntime(id).getRecentLogs(limit);
+    const runtime = this.runtimeInstances.get(id);
+    return runtime ? runtime.getRecentLogs(limit) : [];
   }
 
   async events(id) {
@@ -135,13 +165,19 @@ export class InMemoryWasmWorkspace {
   }
 
   filesystem(id) {
-    this.#mustGetWorkspace(id);
-    return this.#mustGetRuntime(id).filesystem();
+    const ws = this.#mustGetWorkspace(id);
+    const runtime = this.runtimeInstances.get(id);
+    if (runtime) {
+      return runtime.filesystem();
+    }
+    const journal = this.workspaceJournals.get(id);
+    return new WorkspaceFileSystem(ws.repoPath, { journal });
   }
 
   async ports(id) {
     this.#mustGetWorkspace(id);
-    return this.#mustGetRuntime(id).ports();
+    const runtime = this.runtimeInstances.get(id);
+    return runtime ? runtime.ports() : [];
   }
 
   list() {
@@ -150,10 +186,115 @@ export class InMemoryWasmWorkspace {
 
   async health(id) {
     const ws = this.#mustGetWorkspace(id);
-    const runtime = this.#mustGetRuntime(id);
-    ws.health = await runtime.health();
-    ws.status = ws.health;
+    const runtime = this.runtimeInstances.get(id);
+    if (runtime) {
+      ws.health = await runtime.health();
+      ws.status = ws.health;
+    }
     return ws.health;
+  }
+
+  async snapshot(id) {
+    const ws = this.#mustGetWorkspace(id);
+    const runtime = this.runtimeInstances.get(id);
+    const previousSnapshot = ws.latestSnapshotId ? await this.snapshotEngine.storage.load(ws.latestSnapshotId).catch(() => null) : null;
+    const runtimePorts = runtime ? await runtime.ports().catch(() => []) : [];
+    const snapshot = await this.snapshotEngine.create(id, {
+      workspacePath: ws.repoPath,
+      previousSnapshot,
+      environmentVariables: ws.environmentVariables ?? {},
+      runtimeMetadata: {
+        framework: ws.framework,
+        packageManager: ws.packageManager ?? 'unknown',
+        dependencyHash: ws.dependencyHash ?? '',
+        buildHash: ws.buildHash ?? '',
+        ports: runtimePorts
+      }
+    });
+    ws.latestSnapshotId = snapshot.id;
+    this.#recordEvent(id, 'WorkspaceSnapshotCreated', { id, snapshotId: snapshot.id });
+    return snapshot;
+  }
+
+  async suspend(id) {
+    const ws = this.#mustGetWorkspace(id);
+    const snapshot = await this.snapshot(id);
+    const runtime = this.runtimeInstances.get(id);
+    if (runtime) {
+      await runtime.stop();
+      this.runtimeInstances.delete(id);
+    }
+    ws.status = WorkspaceStatus.Suspended;
+    ws.health = WorkspaceStatus.Suspended;
+    this.#recordEvent(id, 'WorkspaceSuspended', { id, snapshotId: snapshot.id });
+    return ws;
+  }
+
+  async resume(id) {
+    const ws = this.#mustGetWorkspace(id);
+    if (this.runtimeInstances.has(id)) {
+      ws.health = await this.runtimeInstances.get(id).health();
+      ws.status = ws.health;
+      return ws;
+    }
+
+    ws.status = WorkspaceStatus.Restoring;
+    ws.health = WorkspaceStatus.Restoring;
+    this.#recordEvent(id, 'WorkspaceRestoring', { id, snapshotId: ws.latestSnapshotId ?? null });
+
+    if (ws.latestSnapshotId) {
+      await this.snapshotEngine.restore(ws.latestSnapshotId, ws.repoPath);
+    }
+
+    const provider = await this.#providerForWorkspace(ws);
+    const artifact = await provider.build({
+      ...(await analyzeRepository(ws.repoPath)),
+      path: ws.repoPath,
+      framework: ws.framework,
+      executionPlan: ws.executionPlan,
+      workspaceId: id,
+      resourceLimits: ws.resourceLimits,
+      environment: ws.environmentVariables ?? {},
+      onEvent: (event) => this.#recordEvent(id, event.type, event),
+      onHealth: (nextStatus) => {
+        ws.health = nextStatus;
+        ws.status = nextStatus;
+      },
+      onPort: (port) => this.#recordEvent(id, 'PortDiscovered', { id, ...port })
+    });
+
+    ws.runtime = artifact.runtime;
+    ws.packageManager = artifact.packageManager ?? ws.packageManager;
+    ws.dependencyHash = artifact.dependencyHash ?? artifact.dependencyFingerprint ?? ws.dependencyHash;
+    ws.environmentVariables = { ...(artifact.environment ?? ws.environmentVariables ?? {}) };
+
+    const runtime = await provider.execute(artifact);
+    this.runtimeInstances.set(id, runtime);
+    await runtime.start();
+    ws.status = await runtime.health();
+    ws.health = ws.status;
+    this.#recordEvent(id, 'WorkspaceResumed', { id, snapshotId: ws.latestSnapshotId ?? null });
+    return ws;
+  }
+
+  async listSnapshots(id) {
+    this.#mustGetWorkspace(id);
+    return this.snapshotEngine.list(id);
+  }
+
+  async restore(id, snapshotId) {
+    const ws = this.#mustGetWorkspace(id);
+    const runtime = this.runtimeInstances.get(id);
+    if (runtime) {
+      await runtime.stop();
+      this.runtimeInstances.delete(id);
+    }
+    ws.status = WorkspaceStatus.Restoring;
+    ws.health = WorkspaceStatus.Restoring;
+    await this.snapshotEngine.restore(snapshotId, ws.repoPath);
+    ws.latestSnapshotId = snapshotId;
+    this.#recordEvent(id, 'WorkspaceSnapshotRestored', { id, snapshotId });
+    return this.resume(id);
   }
 
   cacheStats() {
@@ -182,6 +323,18 @@ export class InMemoryWasmWorkspace {
     return runtime;
   }
 
+  async #providerForWorkspace(workspace) {
+    const analysis = await analyzeRepository(workspace.repoPath);
+    const provider = this.registry.findCompatible({
+      ...analysis,
+      framework: workspace.framework
+    });
+    if (!provider) {
+      throw new Error(`No compatible runtime provider for framework: ${workspace.framework}`);
+    }
+    return provider;
+  }
+
   #recordEvent(id, type, payload = {}) {
     const events = this.workspaceEvents.get(id);
     if (!events) {
@@ -204,3 +357,5 @@ export class InMemoryWasmWorkspace {
 export function createWasmWorkspace(options = {}) {
   return new InMemoryWasmWorkspace(options);
 }
+
+export { SnapshotEngine, LocalSnapshotStorageProvider, FilesystemJournal } from './persistence.js';

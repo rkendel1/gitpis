@@ -155,3 +155,43 @@ test('runtime failure transitions workspace to failed state', async () => {
     await fs.rm(repo, { recursive: true, force: true });
   }
 });
+
+test('workspace snapshot, suspend, and restore preserve filesystem state', async () => {
+  const repo = await mkRunningRepo();
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'gitpis-ws-snapshot-'));
+  const runtime = createWasmWorkspace({ workspaceBase: base });
+
+  let ws;
+  try {
+    ws = await runtime.launch(repo);
+    const filesystem = await runtime.filesystem(ws.id);
+    await filesystem.writeFile('state.txt', 'alpha');
+
+    const firstSnapshot = await runtime.snapshot(ws.id);
+    await filesystem.writeFile('state.txt', 'beta');
+    const secondSnapshot = await runtime.snapshot(ws.id);
+    assert.notEqual(firstSnapshot.id, secondSnapshot.id);
+
+    const snapshots = await runtime.listSnapshots(ws.id);
+    assert.ok(snapshots.length >= 2);
+
+    await runtime.suspend(ws.id);
+    assert.equal(await runtime.health(ws.id), 'suspended');
+
+    await runtime.resume(ws.id);
+    assert.equal(await runtime.health(ws.id), 'running');
+    const resumedFs = await runtime.filesystem(ws.id);
+    assert.equal(await resumedFs.readFile('state.txt', 'utf8'), 'beta');
+
+    await runtime.restore(ws.id, firstSnapshot.id);
+    assert.equal(await runtime.health(ws.id), 'running');
+    const restoredFs = await runtime.filesystem(ws.id);
+    assert.equal(await restoredFs.readFile('state.txt', 'utf8'), 'alpha');
+  } finally {
+    if (ws) {
+      await runtime.stop(ws.id).catch(() => {});
+    }
+    await fs.rm(base, { recursive: true, force: true });
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});

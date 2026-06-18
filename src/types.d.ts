@@ -15,7 +15,7 @@ export interface FileSystem {
   snapshot(snapshotPath: string): Promise<string>;
 }
 
-export type WorkspaceHealth = 'starting' | 'installing' | 'building' | 'running' | 'unhealthy' | 'stopped' | 'failed';
+export type WorkspaceHealth = 'starting' | 'installing' | 'building' | 'running' | 'suspended' | 'restoring' | 'unhealthy' | 'stopped' | 'failed';
 
 export interface ResourceLimits {
   memoryMb: number;
@@ -33,6 +33,8 @@ export interface Workspace {
   createdAt: string;
   health: WorkspaceHealth;
   resourceLimits?: ResourceLimits;
+  environmentVariables?: Record<string, string>;
+  latestSnapshotId?: string | null;
 }
 
 export interface WorkspaceEvent {
@@ -45,6 +47,11 @@ export interface WasmWorkspace {
   launch(repoUrl: string): Promise<Workspace>;
   stop(id: string): Promise<void>;
   restart(id: string): Promise<Workspace>;
+  snapshot(id: string): Promise<Snapshot>;
+  suspend(id: string): Promise<Workspace>;
+  resume(id: string): Promise<Workspace>;
+  restore(id: string, snapshotId: string): Promise<Workspace>;
+  listSnapshots(id: string): Promise<Snapshot[]>;
   logs(id: string): AsyncIterable<string>;
   getLogs(id: string, limit?: number): string[];
   events(id: string): Promise<WorkspaceEvent[]>;
@@ -156,6 +163,94 @@ export interface BuildCache {
 
 export interface EnvironmentProvider {
   get(workspaceId: string): Record<string, string>;
+}
+
+export interface RuntimeMetadata {
+  framework: string;
+  packageManager: string;
+  dependencyHash: string;
+  buildHash: string;
+  ports: PortInfo[];
+}
+
+export interface WorkspaceState {
+  id: string;
+  repositoryUrl: string;
+  filesystemSnapshotId: string;
+  dependencySnapshotId: string;
+  buildSnapshotId: string;
+  environmentVariables: Record<string, string>;
+  runtimeMetadata: RuntimeMetadata;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface IncrementalSnapshot {
+  baseSnapshotId: string | null;
+  changedFiles: string[];
+  deletedFiles: string[];
+}
+
+export interface Snapshot {
+  id: string;
+  workspaceId: string;
+  createdAt: string;
+  compression: 'gzip' | 'zstd' | 'lz4';
+  environmentVariables: Record<string, string>;
+  runtimeMetadata: RuntimeMetadata;
+  incrementalSnapshot: IncrementalSnapshot;
+}
+
+export interface SnapshotEngine {
+  create(workspaceId: string): Promise<Snapshot>;
+  restore(snapshotId: string): Promise<void>;
+  delete(snapshotId: string): Promise<void>;
+}
+
+export interface FilesystemJournal {
+  recordChange(type?: string, target?: string, nextTarget?: string | null): void;
+  replay(handler: (entry: unknown) => void | Promise<void>): Promise<void>;
+  compact(maxEntries?: number): void;
+}
+
+export interface SnapshotStorageProvider {
+  save(snapshot: Snapshot): Promise<void>;
+  load(snapshotId: string): Promise<Snapshot>;
+  delete(snapshotId: string): Promise<void>;
+}
+
+export interface EnvironmentSnapshot {
+  variables: Record<string, string>;
+}
+
+export interface WorkspaceMetadata {
+  framework: string;
+  packageManager: string;
+  dependencyHash: string;
+  buildHash: string;
+  ports: PortInfo[];
+  launchHistory: Array<Record<string, unknown>>;
+}
+
+export interface SnapshotHistory {
+  listSnapshots(workspaceId: string): Promise<Snapshot[]>;
+  restoreVersion(workspaceId: string, snapshotId: string): Promise<Workspace>;
+  deleteVersion(snapshotId: string): Promise<void>;
+}
+
+export interface CheckpointManager {
+  createCheckpoint(workspaceId: string): Promise<Snapshot>;
+  restoreCheckpoint(workspaceId: string, snapshotId: string): Promise<Workspace>;
+}
+
+export interface HibernationManager {
+  suspend(workspaceId: string): Promise<Workspace>;
+  resume(workspaceId: string): Promise<Workspace>;
+  autoHibernate(): Promise<void>;
+}
+
+export interface WorkspaceMigrator {
+  migrate(workspaceId: string, targetNode: string): Promise<void>;
 }
 
 export interface NodeProcess {
