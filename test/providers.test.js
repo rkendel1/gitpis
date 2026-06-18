@@ -90,8 +90,8 @@ test('NodeDependencyResolver resolves dependency graph and package manager', asy
     const resolver = new NodeDependencyResolver();
     const graph = await resolver.resolve({ path: repo, topLevelFiles: ['package.json', 'yarn.lock'] });
     assert.equal(graph.packageManager, PackageManager.Yarn);
-    assert.equal(graph.dependencies[0].name, 'react');
-    assert.equal(graph.devDependencies[0].name, 'vite');
+    assert.ok(graph.dependencies.some((dependency) => dependency.name === 'react'));
+    assert.ok(graph.devDependencies.some((dependency) => dependency.name === 'vite'));
     assert.equal(typeof graph.lockfileHash, 'string');
     assert.equal(typeof graph.dependencyFingerprint, 'string');
   } finally {

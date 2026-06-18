@@ -18,6 +18,10 @@ const DEFAULT_LOG_LIMIT = 200;
 const DEFAULT_INSTALL_TIMEOUT_MS = 120000;
 const DEFAULT_BUILD_TIMEOUT_MS = 120000;
 const DEFAULT_RETENTION_POLICY = Object.freeze({ ttlDays: 30, maxArtifacts: 5000, maxStorageGb: 10 });
+const BYTES_PER_GB = 1024 * 1024 * 1024;
+const TEMP_CACHE_DIR = '.gitpis-cache';
+const BUILD_DIR_CANDIDATES = ['dist', 'build', '.next', 'target'];
+const BUILD_FINGERPRINT_FILES = ['package.json', 'tsconfig.json', 'vite.config.ts', 'vite.config.js', 'next.config.js'];
 
 const PACKAGE_MANAGER_LOCKFILES = [
   { manager: 'npm', lockfile: 'package-lock.json' },
@@ -176,6 +180,45 @@ async function readTextIfExists(filePath) {
   return fs.readFile(filePath, 'utf8');
 }
 
+function calculateHitRate(hits, misses) {
+  const total = hits + misses;
+  if (total === 0) return 0;
+  return Math.round((hits / total) * 100);
+}
+
+function stableSerialize(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function cacheHasEntry(cache, hash) {
+  if (cache?.exists) {
+    return cache.exists(hash);
+  }
+  return Boolean(await cache?.get?.(hash));
+}
+
+async function directorySizeBytes(directoryPath) {
+  const entries = await fs.readdir(directoryPath, { withFileTypes: true });
+  let total = 0;
+  for (const entry of entries) {
+    const absolutePath = path.join(directoryPath, entry.name);
+    if (entry.isDirectory()) {
+      total += await directorySizeBytes(absolutePath);
+    } else if (entry.isFile()) {
+      const stat = await fs.stat(absolutePath);
+      total += stat.size;
+    }
+  }
+  return total;
+}
+
 async function packageManagerVersion(packageManager) {
   try {
     const binary = packageManager === PackageManager.Bun ? 'bun' : packageManager;
@@ -196,10 +239,10 @@ async function packageManagerVersion(packageManager) {
   }
 }
 
-export async function createDependencyFingerprint(workspacePath, packageManager, managerVersion) {
+export async function createDependencyFingerprint(workspacePath, packageManager, providedVersion) {
   const packageJson = await readTextIfExists(path.join(workspacePath, 'package.json'));
   const lockfile = await readTextIfExists(path.join(workspacePath, lockfileForManager(packageManager)));
-  const version = managerVersion ?? await packageManagerVersion(packageManager);
+  const version = providedVersion ?? await packageManagerVersion(packageManager);
   return createHash('sha256').update(packageJson).update(lockfile).update(version).digest('hex');
 }
 
@@ -337,7 +380,7 @@ export class S3CacheProvider {
 
   async put(key, artifact) {
     if (!this.client?.putObject) {
-      throw new Error('S3CacheProvider requires a client with putObject');
+      throw new Error('S3CacheProvider.put requires a client with putObject method');
     }
     await this.client.putObject({
       bucket: this.bucket,
@@ -348,7 +391,7 @@ export class S3CacheProvider {
 
   async get(key, kind) {
     if (!this.client?.getObject) {
-      throw new Error('S3CacheProvider requires a client with getObject');
+      throw new Error('S3CacheProvider.get requires a client with getObject method');
     }
     return this.client.getObject({
       bucket: this.bucket,
@@ -358,6 +401,12 @@ export class S3CacheProvider {
 }
 
 function defaultPnpmStorePath() {
+  if (process.env.PNPM_STORE_DIR) {
+    return process.env.PNPM_STORE_DIR;
+  }
+  if (process.env.npm_config_store_dir) {
+    return process.env.npm_config_store_dir;
+  }
   return path.join(os.homedir(), '.pnpm-store');
 }
 
@@ -433,11 +482,9 @@ export class DependencyCacheService {
     const startedAt = Date.now();
     const artifact = await this.provider.get(key, 'dependencies');
     if (!artifact) {
-      this.metrics.misses += 1;
       return false;
     }
     await this.snapshot.restore(workspacePath, artifact.path, packageManager);
-    this.metrics.hits += 1;
     this.metrics.restores += 1;
     this.metrics.restoreDurationMs += Date.now() - startedAt;
     return true;
@@ -445,7 +492,7 @@ export class DependencyCacheService {
 
   async save(key, workspacePath, packageManager = PackageManager.Npm) {
     const startedAt = Date.now();
-    const tempDir = path.join(workspacePath, '.gitpis-cache', key);
+    const tempDir = path.join(workspacePath, TEMP_CACHE_DIR, key);
     const snapshotRoot = await this.snapshot.create(workspacePath, tempDir, packageManager);
     if (!(await fileExists(snapshotRoot))) return;
     await this.provider.put(key, { kind: 'dependencies', path: snapshotRoot });
@@ -457,26 +504,40 @@ export class DependencyCacheService {
 
   async #enforceRetention(kind) {
     const artifacts = await this.provider.list?.(kind);
-    if (!artifacts || artifacts.length <= this.retentionPolicy.maxArtifacts) {
+    if (!artifacts || artifacts.length === 0) {
       return;
     }
     const sorted = [];
+    let totalBytes = 0;
+    const ttlMs = (this.retentionPolicy.ttlDays ?? 0) * 24 * 60 * 60 * 1000;
+    const now = Date.now();
     for (const absolutePath of artifacts) {
       const stat = await fs.stat(absolutePath);
-      sorted.push({ absolutePath, mtimeMs: stat.mtimeMs });
+      const sizeBytes = await directorySizeBytes(absolutePath);
+      sorted.push({ absolutePath, mtimeMs: stat.mtimeMs, sizeBytes });
+      totalBytes += sizeBytes;
     }
     sorted.sort((a, b) => a.mtimeMs - b.mtimeMs);
-    const removeCount = sorted.length - this.retentionPolicy.maxArtifacts;
-    for (let i = 0; i < removeCount; i += 1) {
-      await this.provider.remove?.(sorted[i].absolutePath);
-      this.metrics.evictions += 1;
+    const maxArtifacts = Math.max(0, this.retentionPolicy.maxArtifacts ?? DEFAULT_RETENTION_POLICY.maxArtifacts);
+    const maxStorageBytes = Math.max(0, Math.floor(this.retentionPolicy.maxStorageGb * BYTES_PER_GB));
+    let kept = 0;
+    for (const artifact of sorted) {
+      const expired = ttlMs > 0 && (now - artifact.mtimeMs) > ttlMs;
+      const exceedsCount = kept >= maxArtifacts;
+      const exceedsSize = maxStorageBytes > 0 && totalBytes > maxStorageBytes;
+      if (expired || exceedsCount || exceedsSize) {
+        await this.provider.remove?.(artifact.absolutePath);
+        totalBytes = Math.max(0, totalBytes - artifact.sizeBytes);
+        this.metrics.evictions += 1;
+        continue;
+      }
+      kept += 1;
     }
   }
 
   getStats() {
-    const totalLookups = this.metrics.hits + this.metrics.misses;
     return {
-      dependencyHitRate: totalLookups === 0 ? 0 : Math.round((this.metrics.hits / totalLookups) * 100),
+      dependencyHitRate: calculateHitRate(this.metrics.hits, this.metrics.misses),
       cacheMisses: this.metrics.misses,
       cacheHits: this.metrics.hits,
       evictionCount: this.metrics.evictions,
@@ -512,11 +573,17 @@ export class BuildCacheService {
   async restore(hash, workspacePath) {
     const artifact = await this.provider.get(hash, 'builds');
     if (!artifact) {
-      this.metrics.misses += 1;
       return false;
     }
-    await fs.cp(artifact.path, workspacePath, { recursive: true, force: true });
-    this.metrics.hits += 1;
+    const entries = await fs.readdir(artifact.path, { withFileTypes: true });
+    const directories = entries.filter((entry) => entry.isDirectory());
+    if (directories.length === 1) {
+      const destination = path.join(workspacePath, directories[0].name);
+      await fs.rm(destination, { recursive: true, force: true });
+      await fs.cp(path.join(artifact.path, directories[0].name), destination, { recursive: true, force: true });
+    } else {
+      await fs.cp(artifact.path, workspacePath, { recursive: true, force: true });
+    }
     this.metrics.restores += 1;
     return true;
   }
@@ -524,13 +591,18 @@ export class BuildCacheService {
   async save(hash, workspacePath) {
     const sourceDir = await this.#detectBuildDir(workspacePath);
     if (!sourceDir) return;
-    await this.provider.put(hash, { kind: 'builds', path: sourceDir });
+    const tempDir = path.join(workspacePath, TEMP_CACHE_DIR, 'builds', hash);
+    await fs.rm(tempDir, { recursive: true, force: true });
+    await fs.mkdir(tempDir, { recursive: true });
+    const outputName = path.basename(sourceDir);
+    await fs.cp(sourceDir, path.join(tempDir, outputName), { recursive: true, force: true });
+    await this.provider.put(hash, { kind: 'builds', path: tempDir });
+    await fs.rm(tempDir, { recursive: true, force: true });
     this.metrics.saves += 1;
   }
 
   async #detectBuildDir(workspacePath) {
-    const candidates = ['dist', 'build', '.next', 'target'];
-    for (const candidate of candidates) {
+    for (const candidate of BUILD_DIR_CANDIDATES) {
       const abs = path.join(workspacePath, candidate);
       if (await fileExists(abs)) return abs;
     }
@@ -538,9 +610,8 @@ export class BuildCacheService {
   }
 
   getStats() {
-    const total = this.metrics.hits + this.metrics.misses;
     return {
-      buildHitRate: total === 0 ? 0 : Math.round((this.metrics.hits / total) * 100),
+      buildHitRate: calculateHitRate(this.metrics.hits, this.metrics.misses),
       buildCacheHits: this.metrics.hits,
       buildCacheMisses: this.metrics.misses
     };
@@ -558,22 +629,12 @@ class NodeDependencyInstaller {
     const lockfileAware = await isLockfileAwareInstall(packageManager, workspace.path, workspace.topLevelFiles ?? []);
     const installCommand = installCommandFor(packageManager, lockfileAware);
     const hash = graph.dependencyFingerprint ?? await createDependencyHash(workspace.path);
-    if (workspace.cache?.exists && await workspace.cache.exists(hash)) {
+    const hasCachedEntry = await cacheHasEntry(workspace.cache, hash);
+    if (hasCachedEntry) {
       const restored = await workspace.cache.restore(hash, workspace.path, packageManager);
       if (restored) {
         workspace.onLog(`[install] restored dependencies from cache (${hash.slice(0, 12)})`);
         return { cacheHit: true, hash, command: null };
-      }
-    }
-
-    if (!workspace.cache?.exists) {
-      const cached = await workspace.cache.get?.(hash);
-      if (cached) {
-        const restored = await workspace.cache.restore(hash, workspace.path, packageManager);
-        if (restored) {
-          workspace.onLog(`[install] restored dependencies from cache (${hash.slice(0, 12)})`);
-          return { cacheHit: true, hash, command: null };
-        }
       }
     }
 
@@ -915,7 +976,6 @@ export class NodeRuntimeProvider {
     this.buildCache = options.buildCache ?? new BuildCacheService({ baseDir: options.cacheDir });
     this.resolver = options.resolver ?? new NodeDependencyResolver();
     this.installer = options.installer ?? new NodeDependencyInstaller({ resolver: this.resolver });
-    this.cacheMetrics = { dependencyRestores: 0, dependencySaves: 0, buildRestores: 0, buildSaves: 0 };
     this.environmentProvider = options.environmentProvider ?? {
       get: () => ({
         NODE_ENV: process.env.NODE_ENV ?? 'development',
@@ -990,16 +1050,15 @@ export class NodeRuntimeProvider {
 
   async buildFingerprint(repository, dependencyHash) {
     const hash = createHash('sha256');
-    const sourceInputs = ['package.json', 'tsconfig.json', 'vite.config.ts', 'vite.config.js', 'next.config.js'];
-    for (const fileName of sourceInputs) {
+    for (const fileName of BUILD_FINGERPRINT_FILES) {
       const filePath = path.join(repository.path, fileName);
       if (await fileExists(filePath)) {
         hash.update(fileName);
         hash.update(await fs.readFile(filePath));
       }
     }
-    hash.update(JSON.stringify(repository.executionPlan ?? {}));
-    hash.update(JSON.stringify(repository.environment ?? {}));
+    hash.update(stableSerialize(repository.executionPlan ?? {}));
+    hash.update(stableSerialize(repository.environment ?? {}));
     hash.update(dependencyHash ?? '');
     return hash.digest('hex');
   }
