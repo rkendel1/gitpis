@@ -380,3 +380,116 @@ export interface NodeProcess {
   restart(): Promise<void>;
   health(): Promise<WorkspaceHealth>;
 }
+
+export type NodeStatus = 'healthy' | 'draining' | 'offline';
+
+export interface WorkerNode {
+  id: string;
+  cpuAvailable: number;
+  memoryAvailable: number;
+  diskAvailable: number;
+  workspaceCount: number;
+  status: NodeStatus;
+  address?: string | null;
+  costPerHour?: number;
+}
+
+export interface WorkspaceLaunchRequest {
+  workspaceId?: string;
+  tenantId?: string;
+  repoUrl?: string;
+  resources?: {
+    cpu?: number;
+    memory?: number;
+    disk?: number;
+    network?: number;
+    runtimeCount?: number;
+  };
+}
+
+export interface NodeAssignment {
+  workspaceId: string;
+  workerId: string;
+  nodeId: string;
+  address?: string | null;
+  tenantId?: string;
+  scheduledAt: string;
+}
+
+export interface Scheduler {
+  schedule(request: WorkspaceLaunchRequest): Promise<NodeAssignment>;
+  reschedule(workspaceId: string): Promise<NodeAssignment>;
+  release(workspaceId: string): Promise<void>;
+}
+
+export interface WorkerRegistry {
+  register(node: WorkerNode): void;
+  unregister(nodeId: string): void;
+  heartbeat(nodeId: string, metrics?: { cpu?: number; memory?: number; disk?: number; workspaces?: number }): void;
+}
+
+export interface ResourceManager {
+  allocate(request: { workspaceId: string; nodeId: string; resources?: WorkspaceLaunchRequest['resources'] }): unknown;
+  release(workspaceId: string): void;
+  rebalance(): unknown;
+}
+
+export interface PlacementStrategy {
+  selectNode(nodes: WorkerNode[], request?: WorkspaceLaunchRequest): WorkerNode | null;
+}
+
+export interface WorkQueue {
+  enqueue(payload: unknown): unknown;
+  dequeue(): unknown;
+  retry(item: unknown, error?: Error | null): unknown;
+  deadLetter(item: unknown, reason?: string): unknown;
+}
+
+export interface ClusterStateStore {
+  saveWorkspace(workspace: { workspaceId: string; tenantId?: string; resources?: WorkspaceLaunchRequest['resources'] }): void;
+  getWorkspace(workspaceId: string): { workspaceId: string; tenantId?: string; resources?: WorkspaceLaunchRequest['resources'] } | null;
+  saveNode(node: WorkerNode): void;
+  getNodes(): WorkerNode[];
+}
+
+export interface WorkspaceLocation {
+  workspaceId: string;
+  nodeId: string;
+}
+
+export interface RecoveryManager {
+  recoverWorkspace(workspaceId: string): Promise<NodeAssignment>;
+}
+
+export interface MigrationManager {
+  migrate(workspaceId: string, destinationNode: string): Promise<WorkspaceLocation>;
+}
+
+export interface Autoscaler {
+  scaleUp(metrics?: Record<string, number>): { action: string; reason: string };
+  scaleDown(metrics?: Record<string, number>): { action: string; reason: string };
+}
+
+export interface DrainManager {
+  drain(workerId: string): Promise<{ workerId: string; status: NodeStatus; affectedWorkspaces: string[]; migrated: string[] }>;
+}
+
+export interface TenantBoundary {
+  tenantId: string;
+}
+
+export interface TenantQuota {
+  maxWorkspaces: number;
+  maxCpu: number;
+  maxMemory: number;
+}
+
+export interface LogAggregator {
+  ingest(entry: Record<string, unknown>): void;
+  query(filter?: Record<string, string>): Record<string, unknown>[];
+}
+
+export interface MetricsCollector {
+  collect(metric: Record<string, unknown>): void;
+  aggregate(): { samples: number; totals: Record<string, number> };
+}

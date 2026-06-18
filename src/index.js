@@ -437,3 +437,4 @@ export function createWasmWorkspace(options = {}) {
 }
 
 export { SnapshotEngine, LocalSnapshotStorageProvider, FilesystemJournal } from './persistence.js';
+export * from './cluster.js';
