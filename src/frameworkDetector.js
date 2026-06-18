@@ -9,8 +9,17 @@ const FRAMEWORK_RULES = [
   { framework: 'svelte', files: ['svelte.config.js', 'svelte.config.cjs'] },
   { framework: 'rust', files: ['Cargo.toml'] },
   { framework: 'go', files: ['go.mod'] },
-  { framework: 'python', files: ['pyproject.toml', 'requirements.txt'] },
-  { framework: 'node', files: ['package.json'] }
+  { framework: 'python', files: ['pyproject.toml', 'requirements.txt'] }
+];
+
+const PACKAGE_FRAMEWORK_HINTS = [
+  { framework: 'nextjs', packageNames: ['next'] },
+  { framework: 'vite', packageNames: ['vite'] },
+  { framework: 'react', packageNames: ['react'] },
+  { framework: 'vue', packageNames: ['vue'] },
+  { framework: 'svelte', packageNames: ['svelte'] },
+  { framework: 'nestjs', packageNames: ['@nestjs/core'] },
+  { framework: 'express', packageNames: ['express'] }
 ];
 
 async function fileExists(filePath) {
@@ -30,16 +39,43 @@ export async function detectFramework(repoPath) {
       }
     }
   }
+
+  const packageJsonPath = path.join(repoPath, 'package.json');
+  if (await fileExists(packageJsonPath)) {
+    try {
+      const raw = await fs.readFile(packageJsonPath, 'utf8');
+      const pkg = JSON.parse(raw);
+      const depEntries = {
+        ...(pkg.dependencies ?? {}),
+        ...(pkg.devDependencies ?? {}),
+        ...(pkg.peerDependencies ?? {}),
+        ...(pkg.optionalDependencies ?? {})
+      };
+
+      for (const hint of PACKAGE_FRAMEWORK_HINTS) {
+        if (hint.packageNames.some((pkgName) => depEntries[pkgName])) {
+          return hint.framework;
+        }
+      }
+    } catch {
+      return 'node';
+    }
+
+    return 'node';
+  }
+
   return 'static';
 }
 
 export function generateExecutionPlan(framework) {
   const table = {
-    nextjs: { build: 'npm run build', start: 'npm run start', defaultPort: 3000 },
+    nextjs: { build: 'npm run build --if-present', start: 'npm run dev', defaultPort: 3000 },
     vite: { build: 'npm run build', start: 'npm run dev -- --host 0.0.0.0', defaultPort: 5173 },
-    react: { build: 'npm run build', start: 'npm run start', defaultPort: 3000 },
+    react: { build: 'npm run build', start: 'npm run dev -- --host 0.0.0.0', defaultPort: 5173 },
     vue: { build: 'npm run build', start: 'npm run dev -- --host 0.0.0.0', defaultPort: 5173 },
     svelte: { build: 'npm run build', start: 'npm run dev -- --host 0.0.0.0', defaultPort: 5173 },
+    express: { build: 'npm run build --if-present', start: 'npm start', defaultPort: 3000 },
+    nestjs: { build: 'npm run build --if-present', start: 'npm run start', defaultPort: 3000 },
     rust: { build: 'cargo build --release', start: './target/release/app', defaultPort: 8080 },
     go: { build: 'go build ./...', start: 'go run .', defaultPort: 8080 },
     python: { build: 'python -m compileall .', start: 'python app.py', defaultPort: 8000 },
