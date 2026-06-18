@@ -17,6 +17,24 @@ async function readBody(req) {
 
 const server = http.createServer(async (req, res) => {
   try {
+    const routeDeleteMatch = req.url?.match(/^\/workspaces\/([^/]+)\/routes\/([^/]+)$/);
+    if (routeDeleteMatch && req.method === 'DELETE') {
+      const [, id, routeId] = routeDeleteMatch;
+      await workspace.deleteRoute(id, routeId);
+      json(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/network/routes') {
+      json(res, 200, await workspace.networkRoutes());
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/network/stats') {
+      json(res, 200, await workspace.networkStats());
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/workspaces') {
       const body = await readBody(req);
       const launched = await workspace.launch(body.repoUrl);
@@ -42,7 +60,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const match = req.url?.match(/^\/workspaces\/([^/]+)(?:\/(stop|restart|ports|health|logs|events|snapshot|suspend|resume|snapshots))?$/);
+    const match = req.url?.match(/^\/workspaces\/([^/]+)(?:\/(stop|restart|ports|health|logs|events|snapshot|suspend|resume|snapshots|routes|network))?$/);
     if (match) {
       const [, id, action] = match;
 
@@ -71,6 +89,25 @@ const server = http.createServer(async (req, res) => {
       if (action === 'ports' && req.method === 'GET') {
         const ports = await workspace.ports(id);
         json(res, 200, ports);
+        return;
+      }
+
+      if (action === 'routes' && req.method === 'GET') {
+        const routes = await workspace.routes(id);
+        json(res, 200, routes);
+        return;
+      }
+
+      if (action === 'routes' && req.method === 'POST') {
+        const body = await readBody(req);
+        const route = await workspace.createRoute(id, body.port);
+        json(res, 201, route);
+        return;
+      }
+
+      if (action === 'network' && req.method === 'GET') {
+        const network = await workspace.workspaceNetwork(id);
+        json(res, 200, network);
         return;
       }
 

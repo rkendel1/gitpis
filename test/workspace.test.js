@@ -94,6 +94,18 @@ test('runtime launch exposes logs, ports, lifecycle, and mounted filesystem', as
     assert.ok(ports.some((port) => port.port === 3000));
     assert.ok(ports.some((port) => port.port === 5173));
 
+    const routes = await runtime.routes(ws.id);
+    assert.ok(routes.length >= 1);
+    assert.ok(routes.some((route) => route.port === 5173));
+    assert.ok(routes.every((route) => route.url.startsWith('https://')));
+
+    const workspaceUrl = await runtime.workspaceUrl(ws.id);
+    assert.equal(typeof workspaceUrl, 'string');
+    assert.ok(workspaceUrl.includes('.ddockit.app'));
+
+    const networkStats = await runtime.networkStats();
+    assert.equal(typeof networkStats.RouteCount, 'number');
+
     const recentLogs = runtime.getLogs(ws.id);
     assert.ok(recentLogs.some((line) => line.includes('starting')));
 
