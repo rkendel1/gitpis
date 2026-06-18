@@ -229,6 +229,10 @@ class WasmtimeRuntimeInstance {
       this.process.once('close', done);
       this.process.once('exit', done);
     });
+
+    if (this.status !== 'stopped') {
+      this.#setStatus('stopped');
+    }
   }
 
   async restart() {
