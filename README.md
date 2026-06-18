@@ -2,6 +2,34 @@
 
 A Gitpod-compatible WebAssembly workspace execution foundation that launches repository sandboxes without Docker or VMs.
 
+## Replatform direction (Issue #19)
+
+This repository is moving to a split architecture:
+
+- **TypeScript control plane**: API layer, orchestration logic, IDE/browser UX, and product workflows.
+- **Rust execution plane**: runtime execution, scheduling, filesystem sandboxing, snapshots, networking core, isolation, and deterministic recovery.
+
+### Rust-first modules
+
+- WASM runtime engine and providers (`Wasmtime`/`WASI` execution layer)
+- Filesystem sandbox and snapshot engine
+- Scheduler, worker agent, resource manager, queueing/autoscaling, and placement
+- Multi-tenant isolation enforcement
+- Deterministic recovery core (log parsing/classification/repair/validation)
+
+### TypeScript-first modules
+
+- REST/API gateway and control-plane orchestration
+- Browser IDE experience (Monaco/editor/file explorer/diff/presence/session UX)
+- AI advisor and heuristic orchestration flows
+- Billing/admin/compliance workflow APIs and dashboards
+
+### Migration phases
+
+1. **Current**: TypeScript orchestration with a minimal Rust runtime kernel.
+2. **PR6–PR7 focus**: migrate scheduler, filesystem sandbox, and snapshot core to Rust.
+3. **PR8–PR10 focus**: keep TypeScript at the product/control plane boundary while execution-critical paths run in Rust.
+
 ## What this repository provides
 
 - WASM-oriented workspace engine (`InMemoryWasmWorkspace`) with lifecycle APIs.
