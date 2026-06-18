@@ -36,6 +36,13 @@ export class WorkspaceFileSystem {
     this.journal?.recordChange?.('modify', filePath);
   }
 
+  async createFile(filePath, content = '') {
+    const resolved = this.resolve(filePath);
+    await fs.mkdir(path.dirname(resolved), { recursive: true });
+    await fs.writeFile(resolved, content, { flag: 'wx' });
+    this.journal?.recordChange?.('create', filePath);
+  }
+
   async mkdir(dirPath) {
     await fs.mkdir(this.resolve(dirPath), { recursive: true });
     this.journal?.recordChange?.('create', dirPath);
@@ -46,8 +53,20 @@ export class WorkspaceFileSystem {
     this.journal?.recordChange?.('delete', targetPath);
   }
 
+  async rename(sourcePath, destinationPath) {
+    const source = this.resolve(sourcePath);
+    const destination = this.resolve(destinationPath);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await fs.rename(source, destination);
+    this.journal?.recordChange?.('rename', sourcePath, destinationPath);
+  }
+
   async list(dir = '.') {
     return fs.readdir(this.resolve(dir));
+  }
+
+  async listDirectory(dir = '.') {
+    return this.list(dir);
   }
 
   async snapshot(snapshotPath) {

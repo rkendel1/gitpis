@@ -68,6 +68,13 @@ npm run start:cli -- resume <workspaceId>
 - `GET /workspaces/:id/events`
 - `GET /network/routes`
 - `GET /network/stats`
+- `GET /workspaces/:id/files?path=.`
+- `GET /workspaces/:id/file?path=src/index.js`
+- `PUT /workspaces/:id/file` with `{ "path": "src/App.tsx", "content": "..." }`
+- `POST /workspaces/:id/terminal` with `{ "command": "npm", "args": ["run", "dev"] }`
+- `GET /workspaces/:id/git/status`
+- `POST /workspaces/:id/git/commit` with `{ "message": "feat: update app" }`
+- `POST /workspaces/:id/git/push` with `{ "remote": "origin", "branch": "main" }`
 
 ## CLI
 

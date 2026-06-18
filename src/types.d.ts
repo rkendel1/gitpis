@@ -113,10 +113,123 @@ export interface RouteHealthChecker {
 export interface FileSystem {
   readFile(path: string, encoding?: BufferEncoding): Promise<string | Buffer>;
   writeFile(path: string, content: string | Buffer): Promise<void>;
+  createFile(path: string, content?: string | Buffer): Promise<void>;
   mkdir(path: string): Promise<void>;
   remove(path: string): Promise<void>;
+  rename(sourcePath: string, destinationPath: string): Promise<void>;
   list(path?: string): Promise<string[]>;
+  listDirectory(path?: string): Promise<string[]>;
   snapshot(snapshotPath: string): Promise<string>;
+}
+
+export interface IdeSession {
+  sessionId: string;
+  workspaceId: string;
+  userId: string;
+  createdAt: string;
+}
+
+export interface IdeProvider {
+  initialize(workspaceId: string, userId?: string): Promise<IdeSession>;
+  destroy(sessionId: string): Promise<void>;
+}
+
+export interface EditorBackend {
+  readFile(workspaceId: string, path: string, encoding?: BufferEncoding): Promise<string | Buffer>;
+  writeFile(workspaceId: string, path: string, content: string | Buffer): Promise<void>;
+  watchFile(workspaceId: string, listener: (event: WorkspaceEvent) => void): () => void;
+  listFiles(workspaceId: string, path?: string): Promise<string[]>;
+}
+
+export interface FileService {
+  readFile(workspaceId: string, path: string, encoding?: BufferEncoding): Promise<string | Buffer>;
+  writeFile(workspaceId: string, path: string, content: string | Buffer): Promise<void>;
+  createFile(workspaceId: string, path: string, content?: string | Buffer): Promise<void>;
+  deleteFile(workspaceId: string, path: string): Promise<void>;
+  renameFile(workspaceId: string, sourcePath: string, destinationPath: string): Promise<void>;
+  listDirectory(workspaceId: string, path?: string): Promise<string[]>;
+}
+
+export interface FileWatcher {
+  subscribe(workspaceId: string, listener: (event: WorkspaceEvent) => void): () => void;
+}
+
+export interface TerminalSession {
+  terminalId: string;
+  workspaceId: string;
+  createdAt: string;
+  cwd?: string;
+}
+
+export interface TerminalService {
+  createTerminal(workspaceId: string, options?: { cwd?: string }): Promise<TerminalSession>;
+  execute(
+    terminalId: string,
+    command: string,
+    args?: string[],
+    options?: { cwd?: string; env?: Record<string, string>; stdin?: string }
+  ): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>;
+  streamOutput(terminalId: string): unknown[];
+  destroy(terminalId: string): Promise<void>;
+}
+
+export interface GitService {
+  status(workspaceId: string): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>;
+  commit(
+    workspaceId: string,
+    message: string,
+    options?: { stageAll?: boolean }
+  ): Promise<{ ok: boolean; code: number; stdout: string; stderr: string; noChanges?: boolean }>;
+  push(workspaceId: string, remote?: string, branch?: string): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>;
+  pull(workspaceId: string, remote?: string, branch?: string): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>;
+  branch(workspaceId: string, name: string): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>;
+  checkout(workspaceId: string, ref: string): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>;
+}
+
+export interface DiffService {
+  compare(fileA: string, fileB: string): Promise<{ inline: string; sideBySide: string[] }>;
+}
+
+export interface SearchService {
+  search(
+    workspaceId: string,
+    query: string,
+    options?: { regex?: boolean; caseSensitive?: boolean; filePattern?: string }
+  ): Promise<Array<{ path: string; line: number; column: number; text: string }>>;
+}
+
+export interface LspManager {
+  startServer(workspaceId: string, language: string): Promise<{ serverId: string; language: string }>;
+  stopServer(serverId: string): Promise<void>;
+}
+
+export interface DebugService {
+  attach(workspaceId: string, target?: string): Promise<{ sessionId: string; workspaceId: string; target?: string }>;
+  detach(sessionId: string): Promise<void>;
+  setBreakpoint(sessionId: string, filePath: string, line: number): Promise<void>;
+  inspect(sessionId: string, expression: string): Promise<unknown>;
+}
+
+export interface PreviewService {
+  getPreviewUrl(workspaceId: string): Promise<string | null>;
+  refresh(workspaceId: string): Promise<{ workspaceId: string; refreshedAt: string }>;
+}
+
+export interface Presence {
+  userId: string;
+  cursorPosition: { line: number; column: number };
+  activeFile: string;
+}
+
+export interface WorkspacePermission {
+  read: boolean;
+  write: boolean;
+  terminal: boolean;
+  admin: boolean;
+}
+
+export interface WorkspaceSocket {
+  subscribe(channel: 'files' | 'terminal' | 'logs' | 'git' | 'presence' | 'runtime-events', listener: (payload: unknown) => void): () => void;
 }
 
 export type WorkspaceHealth = 'starting' | 'installing' | 'building' | 'running' | 'suspended' | 'restoring' | 'unhealthy' | 'stopped' | 'failed';
@@ -167,6 +280,12 @@ export interface WasmWorkspace {
   workspaceNetwork(id: string): Promise<WorkspaceNetwork>;
   workspaceUrl(id: string): Promise<string | null>;
   workspaceDomains(id: string): Promise<unknown[]>;
+  initializeIdeSession(workspaceId: string, userId?: string): Promise<IdeSession>;
+  destroyIdeSession(sessionId: string): Promise<void>;
+  fileService(): FileService;
+  terminalService(): TerminalService;
+  gitService(): GitService;
+  workspaceSocket(): WorkspaceSocket;
   networkRoutes(): Promise<Route[]>;
   networkStats(): Promise<Record<string, number>>;
   health(id: string): Promise<WorkspaceHealth>;

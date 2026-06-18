@@ -7,6 +7,7 @@ import { RuntimeProviderRegistry, NodeRuntimeProvider, WasmtimeProvider, default
 import { WorkspaceFileSystem } from './filesystem.js';
 import { FilesystemJournal, LocalSnapshotStorageProvider, SnapshotEngine } from './persistence.js';
 import { NetworkingManager } from './networking.js';
+import { InMemoryIdeProvider, WorkspaceFileService, WorkspaceTerminalService, WorkspaceGitService, WorkspaceSocket } from './ide.js';
 
 const WORKSPACE_BASE = path.resolve('.wasm-workspaces');
 const RUNTIME_DIR = 'runtime';
@@ -49,6 +50,11 @@ export class InMemoryWasmWorkspace {
       storageProvider: snapshotStorageProvider,
       compression: options.snapshotCompression ?? 'zstd'
     });
+    this.ideProvider = options.ideProvider ?? new InMemoryIdeProvider();
+    this.fileServiceLayer = options.fileService ?? new WorkspaceFileService(this);
+    this.terminalServiceLayer = options.terminalService ?? new WorkspaceTerminalService(this);
+    this.gitServiceLayer = options.gitService ?? new WorkspaceGitService(this);
+    this.socketGateway = options.workspaceSocket ?? new WorkspaceSocket();
   }
 
   async launch(repoUrl) {
@@ -377,6 +383,31 @@ export class InMemoryWasmWorkspace {
     return this.networkingManager.domains(id);
   }
 
+  async initializeIdeSession(workspaceId, userId = 'anonymous') {
+    this.#mustGetWorkspace(workspaceId);
+    return this.ideProvider.initialize(workspaceId, userId);
+  }
+
+  async destroyIdeSession(sessionId) {
+    await this.ideProvider.destroy(sessionId);
+  }
+
+  fileService() {
+    return this.fileServiceLayer;
+  }
+
+  terminalService() {
+    return this.terminalServiceLayer;
+  }
+
+  gitService() {
+    return this.gitServiceLayer;
+  }
+
+  workspaceSocket() {
+    return this.socketGateway;
+  }
+
   #mustGetWorkspace(id) {
     const ws = this.workspaces.get(id);
     if (!ws) {
@@ -437,4 +468,5 @@ export function createWasmWorkspace(options = {}) {
 }
 
 export { SnapshotEngine, LocalSnapshotStorageProvider, FilesystemJournal } from './persistence.js';
+export * from './ide.js';
 export * from './cluster.js';
