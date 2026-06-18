@@ -9,6 +9,8 @@ A Gitpod-compatible WebAssembly workspace execution foundation that launches rep
 - Framework detection and execution-plan generation.
 - Node.js runtime provider with package-manager auto-detection (`npm`, `pnpm`, `yarn`; `bun` detection stubbed for future support).
 - Dependency installation orchestration with lockfile-aware commands and local dependency cache.
+- Dependency graph resolution + deterministic dependency fingerprinting.
+- Build cache service for common output directories (`dist`, `build`, `.next`, `target`).
 - Sandboxed virtual filesystem wrapper.
 - Port and virtual networking metadata layer.
 - Real process-backed Wasmtime runtime provider with lifecycle, health, logs, and port discovery.
@@ -44,6 +46,7 @@ npm run start:cli -- launch https://github.com/user/project.git
 
 - `POST /workspaces` with `{ "repoUrl": "..." }`
 - `GET /workspaces`
+- `GET /cache/stats`
 - `GET /workspaces/:id`
 - `POST /workspaces/:id/stop`
 - `POST /workspaces/:id/restart`

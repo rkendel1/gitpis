@@ -29,6 +29,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'GET' && req.url === '/cache/stats') {
+      json(res, 200, workspace.cacheStats());
+      return;
+    }
+
     const match = req.url?.match(/^\/workspaces\/([^/]+)(?:\/(stop|restart|ports|health|logs|events))?$/);
     if (match) {
       const [, id, action] = match;

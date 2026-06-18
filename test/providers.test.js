@@ -3,7 +3,14 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
-import { PackageManager, detectPackageManager, NodeRuntimeProvider, evaluateNodeRuntimeCandidates } from '../src/providers.js';
+import {
+  PackageManager,
+  detectPackageManager,
+  NodeRuntimeProvider,
+  evaluateNodeRuntimeCandidates,
+  NodeDependencyResolver,
+  createDependencyFingerprint
+} from '../src/providers.js';
 
 async function mkRepo(files) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gitpis-provider-'));
@@ -67,4 +74,42 @@ test('runtime candidate evaluation returns recommendation and benchmarks', () =>
   assert.ok(result.candidates.length >= 5);
   assert.equal(result.recommendation.primary, 'Node WASI');
   assert.equal(typeof result.recommendation.benchmarkData.coldStartSeconds, 'number');
+});
+
+test('NodeDependencyResolver resolves dependency graph and package manager', async () => {
+  const repo = await mkRepo({
+    'package.json': JSON.stringify({
+      name: 'resolver-test',
+      dependencies: { react: '^18.0.0' },
+      devDependencies: { vite: '^5.0.0' }
+    }),
+    'yarn.lock': '# lock'
+  });
+
+  try {
+    const resolver = new NodeDependencyResolver();
+    const graph = await resolver.resolve({ path: repo, topLevelFiles: ['package.json', 'yarn.lock'] });
+    assert.equal(graph.packageManager, PackageManager.Yarn);
+    assert.equal(graph.dependencies[0].name, 'react');
+    assert.equal(graph.devDependencies[0].name, 'vite');
+    assert.equal(typeof graph.lockfileHash, 'string');
+    assert.equal(typeof graph.dependencyFingerprint, 'string');
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
+});
+
+test('createDependencyFingerprint is deterministic for same inputs', async () => {
+  const repo = await mkRepo({
+    'package.json': JSON.stringify({ name: 'fingerprint-test', dependencies: { express: '^4.0.0' } }),
+    'package-lock.json': '{"name":"fingerprint-test","lockfileVersion":3}'
+  });
+
+  try {
+    const first = await createDependencyFingerprint(repo, PackageManager.Npm, '10.0.0');
+    const second = await createDependencyFingerprint(repo, PackageManager.Npm, '10.0.0');
+    assert.equal(first, second);
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
 });

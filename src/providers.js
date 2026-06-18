@@ -4,6 +4,7 @@ import { EventEmitter, on } from 'node:events';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import os from 'node:os';
 import { WorkspaceFileSystem } from './filesystem.js';
 
 const WASMTIME_COMPATIBLE_FRAMEWORKS = ['node', 'rust', 'go', 'python', 'static', 'vite', 'react', 'vue', 'svelte', 'nextjs', 'express', 'nestjs'];
@@ -16,6 +17,7 @@ const MAX_LOG_BUFFER_SIZE = 500;
 const DEFAULT_LOG_LIMIT = 200;
 const DEFAULT_INSTALL_TIMEOUT_MS = 120000;
 const DEFAULT_BUILD_TIMEOUT_MS = 120000;
+const DEFAULT_RETENTION_POLICY = Object.freeze({ ttlDays: 30, maxArtifacts: 5000, maxStorageGb: 10 });
 
 const PACKAGE_MANAGER_LOCKFILES = [
   { manager: 'npm', lockfile: 'package-lock.json' },
@@ -145,6 +147,13 @@ function installCommandFor(packageManager, lockfileAware) {
   return lockfileAware ? 'npm ci' : 'npm install';
 }
 
+function lockfileForManager(packageManager) {
+  if (packageManager === PackageManager.Pnpm) return 'pnpm-lock.yaml';
+  if (packageManager === PackageManager.Yarn) return 'yarn.lock';
+  if (packageManager === PackageManager.Bun) return 'bun.lockb';
+  return 'package-lock.json';
+}
+
 async function createDependencyHash(workspacePath) {
   const hash = createHash('sha256');
   const hashInputs = ['package.json', ...PACKAGE_MANAGER_LOCKFILES.map((entry) => entry.lockfile)];
@@ -160,6 +169,59 @@ async function createDependencyHash(workspacePath) {
   }
 
   return hash.digest('hex');
+}
+
+async function readTextIfExists(filePath) {
+  if (!(await fileExists(filePath))) return '';
+  return fs.readFile(filePath, 'utf8');
+}
+
+async function packageManagerVersion(packageManager) {
+  try {
+    const binary = packageManager === PackageManager.Bun ? 'bun' : packageManager;
+    const child = spawnShell(`${binary} --version`, process.cwd(), process.env);
+    let output = '';
+    if (child.stdout) {
+      child.stdout.on('data', (chunk) => {
+        output += chunk.toString('utf8');
+      });
+    }
+    await new Promise((resolve, reject) => {
+      child.on('close', (code) => (code === 0 ? resolve() : reject(new Error('version command failed'))));
+      child.on('error', reject);
+    });
+    return output.trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+export async function createDependencyFingerprint(workspacePath, packageManager, managerVersion) {
+  const packageJson = await readTextIfExists(path.join(workspacePath, 'package.json'));
+  const lockfile = await readTextIfExists(path.join(workspacePath, lockfileForManager(packageManager)));
+  const version = managerVersion ?? await packageManagerVersion(packageManager);
+  return createHash('sha256').update(packageJson).update(lockfile).update(version).digest('hex');
+}
+
+export class NodeDependencyResolver {
+  async detectManager(workspace) {
+    return detectPackageManager(workspace.path, workspace.topLevelFiles ?? []);
+  }
+
+  async resolve(workspace) {
+    const packageManager = await this.detectManager(workspace);
+    const pkg = await readPackageJson(workspace.path);
+    const lockfileHash = await createDependencyHash(workspace.path);
+    const toEntries = (obj = {}) => Object.entries(obj).map(([name, version]) => ({ name, version }));
+    const fingerprint = await createDependencyFingerprint(workspace.path, packageManager);
+    return {
+      dependencies: toEntries(pkg?.dependencies),
+      devDependencies: toEntries(pkg?.devDependencies),
+      lockfileHash,
+      dependencyFingerprint: fingerprint,
+      packageManager
+    };
+  }
 }
 
 async function isLockfileAwareInstall(packageManager, workspacePath, topLevelFiles = []) {
@@ -232,54 +294,286 @@ async function runAndCapture(command, cwd, onLog, env, options = {}) {
   });
 }
 
-class LocalDependencyCache {
-  constructor(baseDir = path.resolve('.wasm-workspaces/dependency-cache')) {
+export class LocalDiskCacheProvider {
+  constructor(baseDir = path.resolve('.cache')) {
     this.baseDir = baseDir;
   }
 
+  async put(key, artifact) {
+    const targetDir = path.join(this.baseDir, artifact.kind, key);
+    await fs.mkdir(path.dirname(targetDir), { recursive: true });
+    await fs.rm(targetDir, { recursive: true, force: true });
+    await fs.cp(artifact.path, targetDir, { recursive: true, force: true });
+    await fs.writeFile(path.join(targetDir, '.meta.json'), JSON.stringify({
+      createdAt: new Date().toISOString(),
+      kind: artifact.kind
+    }));
+  }
+
+  async get(key, kind) {
+    const targetDir = path.join(this.baseDir, kind, key);
+    if (!(await fileExists(targetDir))) return null;
+    return { key, kind, path: targetDir };
+  }
+
+  async list(kind) {
+    const dir = path.join(this.baseDir, kind);
+    if (!(await fileExists(dir))) return [];
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(dir, entry.name));
+  }
+
+  async remove(absoluteArtifactPath) {
+    await fs.rm(absoluteArtifactPath, { recursive: true, force: true });
+  }
+}
+
+export class S3CacheProvider {
+  constructor(client, options = {}) {
+    this.client = client;
+    this.bucket = options.bucket ?? '';
+    this.prefix = options.prefix ?? 'gitpis-cache';
+  }
+
+  async put(key, artifact) {
+    if (!this.client?.putObject) {
+      throw new Error('S3CacheProvider requires a client with putObject');
+    }
+    await this.client.putObject({
+      bucket: this.bucket,
+      key: `${this.prefix}/${artifact.kind}/${key}`,
+      bodyPath: artifact.path
+    });
+  }
+
+  async get(key, kind) {
+    if (!this.client?.getObject) {
+      throw new Error('S3CacheProvider requires a client with getObject');
+    }
+    return this.client.getObject({
+      bucket: this.bucket,
+      key: `${this.prefix}/${kind}/${key}`
+    });
+  }
+}
+
+function defaultPnpmStorePath() {
+  return path.join(os.homedir(), '.pnpm-store');
+}
+
+class NodeModulesSnapshot {
+  async create(workspacePath, cacheDir, packageManager) {
+    const snapshotTargets = [path.join(workspacePath, 'node_modules')];
+    if (packageManager === PackageManager.Pnpm) {
+      snapshotTargets.push(defaultPnpmStorePath());
+    }
+    if (packageManager === PackageManager.Yarn) {
+      snapshotTargets.push(path.join(workspacePath, '.yarn', 'cache'));
+    }
+
+    const snapshotRoot = path.join(cacheDir, 'snapshot');
+    await fs.rm(snapshotRoot, { recursive: true, force: true });
+    await fs.mkdir(snapshotRoot, { recursive: true });
+
+    for (const target of snapshotTargets) {
+      if (await fileExists(target)) {
+        const name = path.basename(target);
+        await fs.cp(target, path.join(snapshotRoot, name), { recursive: true, force: true });
+      }
+    }
+
+    return snapshotRoot;
+  }
+
+  async restore(workspacePath, snapshotPath, packageManager) {
+    const nodeModules = path.join(snapshotPath, 'node_modules');
+    if (await fileExists(nodeModules)) {
+      const destination = path.join(workspacePath, 'node_modules');
+      await fs.rm(destination, { recursive: true, force: true });
+      await fs.cp(nodeModules, destination, { recursive: true, force: true });
+    }
+
+    if (packageManager === PackageManager.Pnpm) {
+      const store = path.join(snapshotPath, '.pnpm-store');
+      if (await fileExists(store)) {
+        await fs.mkdir(path.dirname(defaultPnpmStorePath()), { recursive: true });
+        await fs.rm(defaultPnpmStorePath(), { recursive: true, force: true });
+        await fs.cp(store, defaultPnpmStorePath(), { recursive: true, force: true });
+      }
+    }
+
+    if (packageManager === PackageManager.Yarn) {
+      const yarnCache = path.join(snapshotPath, 'cache');
+      if (await fileExists(yarnCache)) {
+        const destination = path.join(workspacePath, '.yarn', 'cache');
+        await fs.mkdir(path.dirname(destination), { recursive: true });
+        await fs.rm(destination, { recursive: true, force: true });
+        await fs.cp(yarnCache, destination, { recursive: true, force: true });
+      }
+    }
+  }
+}
+
+export class DependencyCacheService {
+  constructor(options = {}) {
+    this.provider = options.provider ?? new LocalDiskCacheProvider(options.baseDir);
+    this.snapshot = options.snapshot ?? new NodeModulesSnapshot();
+    this.retentionPolicy = options.retentionPolicy ?? DEFAULT_RETENTION_POLICY;
+    this.metrics = { hits: 0, misses: 0, evictions: 0, restores: 0, saves: 0, restoreDurationMs: 0, saveDurationMs: 0 };
+  }
+
+  async exists(key) {
+    const artifact = await this.provider.get(key, 'dependencies');
+    if (artifact) this.metrics.hits += 1;
+    else this.metrics.misses += 1;
+    return Boolean(artifact);
+  }
+
+  async restore(key, workspacePath, packageManager = PackageManager.Npm) {
+    const startedAt = Date.now();
+    const artifact = await this.provider.get(key, 'dependencies');
+    if (!artifact) {
+      this.metrics.misses += 1;
+      return false;
+    }
+    await this.snapshot.restore(workspacePath, artifact.path, packageManager);
+    this.metrics.hits += 1;
+    this.metrics.restores += 1;
+    this.metrics.restoreDurationMs += Date.now() - startedAt;
+    return true;
+  }
+
+  async save(key, workspacePath, packageManager = PackageManager.Npm) {
+    const startedAt = Date.now();
+    const tempDir = path.join(workspacePath, '.gitpis-cache', key);
+    const snapshotRoot = await this.snapshot.create(workspacePath, tempDir, packageManager);
+    if (!(await fileExists(snapshotRoot))) return;
+    await this.provider.put(key, { kind: 'dependencies', path: snapshotRoot });
+    await fs.rm(tempDir, { recursive: true, force: true });
+    this.metrics.saves += 1;
+    this.metrics.saveDurationMs += Date.now() - startedAt;
+    await this.#enforceRetention('dependencies');
+  }
+
+  async #enforceRetention(kind) {
+    const artifacts = await this.provider.list?.(kind);
+    if (!artifacts || artifacts.length <= this.retentionPolicy.maxArtifacts) {
+      return;
+    }
+    const sorted = [];
+    for (const absolutePath of artifacts) {
+      const stat = await fs.stat(absolutePath);
+      sorted.push({ absolutePath, mtimeMs: stat.mtimeMs });
+    }
+    sorted.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    const removeCount = sorted.length - this.retentionPolicy.maxArtifacts;
+    for (let i = 0; i < removeCount; i += 1) {
+      await this.provider.remove?.(sorted[i].absolutePath);
+      this.metrics.evictions += 1;
+    }
+  }
+
+  getStats() {
+    const totalLookups = this.metrics.hits + this.metrics.misses;
+    return {
+      dependencyHitRate: totalLookups === 0 ? 0 : Math.round((this.metrics.hits / totalLookups) * 100),
+      cacheMisses: this.metrics.misses,
+      cacheHits: this.metrics.hits,
+      evictionCount: this.metrics.evictions,
+      artifactRestoreDurationMs: this.metrics.restoreDurationMs,
+      artifactSaveDurationMs: this.metrics.saveDurationMs
+    };
+  }
+
+  // Legacy compatibility with previous dependency cache shape.
   async get(hash) {
-    const cachePath = path.join(this.baseDir, hash, 'node_modules');
-    if (await fileExists(cachePath)) {
-      return { hash, path: cachePath };
+    const artifact = await this.provider.get(hash, 'dependencies');
+    return artifact ? { hash, path: artifact.path } : null;
+  }
+
+  async put(hash, workspacePath) {
+    await this.save(hash, workspacePath);
+  }
+}
+
+export class BuildCacheService {
+  constructor(options = {}) {
+    this.provider = options.provider ?? new LocalDiskCacheProvider(options.baseDir);
+    this.metrics = { hits: 0, misses: 0, restores: 0, saves: 0 };
+  }
+
+  async exists(hash) {
+    const artifact = await this.provider.get(hash, 'builds');
+    if (artifact) this.metrics.hits += 1;
+    else this.metrics.misses += 1;
+    return Boolean(artifact);
+  }
+
+  async restore(hash, workspacePath) {
+    const artifact = await this.provider.get(hash, 'builds');
+    if (!artifact) {
+      this.metrics.misses += 1;
+      return false;
+    }
+    await fs.cp(artifact.path, workspacePath, { recursive: true, force: true });
+    this.metrics.hits += 1;
+    this.metrics.restores += 1;
+    return true;
+  }
+
+  async save(hash, workspacePath) {
+    const sourceDir = await this.#detectBuildDir(workspacePath);
+    if (!sourceDir) return;
+    await this.provider.put(hash, { kind: 'builds', path: sourceDir });
+    this.metrics.saves += 1;
+  }
+
+  async #detectBuildDir(workspacePath) {
+    const candidates = ['dist', 'build', '.next', 'target'];
+    for (const candidate of candidates) {
+      const abs = path.join(workspacePath, candidate);
+      if (await fileExists(abs)) return abs;
     }
     return null;
   }
 
-  async restore(hash, workspacePath) {
-    const cachePath = path.join(this.baseDir, hash, 'node_modules');
-    if (!(await fileExists(cachePath))) {
-      return false;
-    }
-
-    const destination = path.join(workspacePath, 'node_modules');
-    await fs.rm(destination, { recursive: true, force: true });
-    await fs.cp(cachePath, destination, { recursive: true, force: true });
-    return true;
-  }
-
-  async put(hash, workspacePath) {
-    const source = path.join(workspacePath, 'node_modules');
-    if (!(await fileExists(source))) {
-      return;
-    }
-    const target = path.join(this.baseDir, hash, 'node_modules');
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.rm(target, { recursive: true, force: true });
-    await fs.cp(source, target, { recursive: true, force: true });
+  getStats() {
+    const total = this.metrics.hits + this.metrics.misses;
+    return {
+      buildHitRate: total === 0 ? 0 : Math.round((this.metrics.hits / total) * 100),
+      buildCacheHits: this.metrics.hits,
+      buildCacheMisses: this.metrics.misses
+    };
   }
 }
 
 class NodeDependencyInstaller {
+  constructor(options = {}) {
+    this.resolver = options.resolver ?? new NodeDependencyResolver();
+  }
+
   async install(workspace) {
-    const lockfileAware = await isLockfileAwareInstall(workspace.packageManager, workspace.path, workspace.topLevelFiles ?? []);
-    const installCommand = installCommandFor(workspace.packageManager, lockfileAware);
-    const hash = await createDependencyHash(workspace.path);
-    const cached = await workspace.cache.get(hash);
-    if (cached) {
-      const restored = await workspace.cache.restore(hash, workspace.path);
+    const graph = await this.resolver.resolve(workspace);
+    const packageManager = workspace.packageManager ?? graph.packageManager;
+    const lockfileAware = await isLockfileAwareInstall(packageManager, workspace.path, workspace.topLevelFiles ?? []);
+    const installCommand = installCommandFor(packageManager, lockfileAware);
+    const hash = graph.dependencyFingerprint ?? await createDependencyHash(workspace.path);
+    if (workspace.cache?.exists && await workspace.cache.exists(hash)) {
+      const restored = await workspace.cache.restore(hash, workspace.path, packageManager);
       if (restored) {
         workspace.onLog(`[install] restored dependencies from cache (${hash.slice(0, 12)})`);
         return { cacheHit: true, hash, command: null };
+      }
+    }
+
+    if (!workspace.cache?.exists) {
+      const cached = await workspace.cache.get?.(hash);
+      if (cached) {
+        const restored = await workspace.cache.restore(hash, workspace.path, packageManager);
+        if (restored) {
+          workspace.onLog(`[install] restored dependencies from cache (${hash.slice(0, 12)})`);
+          return { cacheHit: true, hash, command: null };
+        }
       }
     }
 
@@ -291,7 +585,11 @@ class NodeDependencyInstaller {
       { stage: 'install', timeoutMs: workspace.timeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS }
     );
 
-    await workspace.cache.put(hash, workspace.path);
+    if (workspace.cache?.save) {
+      await workspace.cache.save(hash, workspace.path, packageManager);
+    } else {
+      await workspace.cache.put(hash, workspace.path);
+    }
     return { cacheHit: false, hash, command: installCommand };
   }
 }
@@ -613,8 +911,11 @@ export class WasmtimeProvider {
 
 export class NodeRuntimeProvider {
   constructor(options = {}) {
-    this.cache = options.cache ?? new LocalDependencyCache(options.cacheDir);
-    this.installer = options.installer ?? new NodeDependencyInstaller();
+    this.cache = options.cache ?? new DependencyCacheService({ baseDir: options.cacheDir });
+    this.buildCache = options.buildCache ?? new BuildCacheService({ baseDir: options.cacheDir });
+    this.resolver = options.resolver ?? new NodeDependencyResolver();
+    this.installer = options.installer ?? new NodeDependencyInstaller({ resolver: this.resolver });
+    this.cacheMetrics = { dependencyRestores: 0, dependencySaves: 0, buildRestores: 0, buildSaves: 0 };
     this.environmentProvider = options.environmentProvider ?? {
       get: () => ({
         NODE_ENV: process.env.NODE_ENV ?? 'development',
@@ -645,7 +946,8 @@ export class NodeRuntimeProvider {
   }
 
   async build(repository) {
-    const packageManager = await detectPackageManager(repository.path, repository.topLevelFiles ?? []);
+    const graph = await this.resolver.resolve({ path: repository.path, topLevelFiles: repository.topLevelFiles ?? [] });
+    const packageManager = graph.packageManager;
     const packageJson = await readPackageJson(repository.path);
     const scripts = packageJson?.scripts ?? {};
     const profile = FRAMEWORK_PROFILES[repository.framework] ?? FRAMEWORK_PROFILES.node;
@@ -665,7 +967,9 @@ export class NodeRuntimeProvider {
       id: repository.workspaceId,
       runtime: 'node-wasm',
       packageManager,
-      dependencyHash: await createDependencyHash(repository.path),
+      dependencyGraph: graph,
+      dependencyHash: graph.lockfileHash,
+      dependencyFingerprint: graph.dependencyFingerprint,
       installCommand: installCommandFor(packageManager, lockfileAware),
       buildCommand: hasBuildScript ? scriptCommandFor(packageManager, 'build') : 'none',
       startCommand: scriptCommandFor(packageManager, profile.start, profile.hostFlag ?? ''),
@@ -682,6 +986,29 @@ export class NodeRuntimeProvider {
   async execute(artifact) {
     const runtime = new WasmtimeRuntimeInstance(artifact);
     return runtime;
+  }
+
+  async buildFingerprint(repository, dependencyHash) {
+    const hash = createHash('sha256');
+    const sourceInputs = ['package.json', 'tsconfig.json', 'vite.config.ts', 'vite.config.js', 'next.config.js'];
+    for (const fileName of sourceInputs) {
+      const filePath = path.join(repository.path, fileName);
+      if (await fileExists(filePath)) {
+        hash.update(fileName);
+        hash.update(await fs.readFile(filePath));
+      }
+    }
+    hash.update(JSON.stringify(repository.executionPlan ?? {}));
+    hash.update(JSON.stringify(repository.environment ?? {}));
+    hash.update(dependencyHash ?? '');
+    return hash.digest('hex');
+  }
+
+  cacheStats() {
+    return {
+      ...this.cache.getStats?.(),
+      ...this.buildCache.getStats?.()
+    };
   }
 }
 
