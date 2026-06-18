@@ -55,9 +55,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && req.url === '/cluster/workspaces') {
+      const locationIndex = new Map(
+        cluster.stateStore.listWorkspaceLocations().map((location) => [location.workspaceId, location.nodeId])
+      );
       const workspaces = workspace.list().map((item) => ({
         workspaceId: item.id,
-        nodeId: cluster.stateStore.getWorkspaceLocation(item.id)?.nodeId ?? workerId,
+        nodeId: locationIndex.get(item.id) ?? workerId,
         status: item.status
       }));
       json(res, 200, workspaces);

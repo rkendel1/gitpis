@@ -23,34 +23,42 @@ test('Scheduler places workspace on least-loaded healthy node and tracks locatio
   const assignment = await scheduler.schedule({ workspaceId: 'ws-1', tenantId: 'tenant-a', resources: { cpu: 5, memory: 64, disk: 1 } });
   assert.equal(assignment.workerId, 'worker-2');
   assert.deepEqual(stateStore.getWorkspaceLocation('ws-1'), { workspaceId: 'ws-1', nodeId: 'worker-2' });
+  assert.equal(registry.get('worker-2')?.cpuAvailable, 65);
+  assert.equal(registry.get('worker-2')?.memoryAvailable, 192);
+  assert.equal(registry.get('worker-2')?.diskAvailable, 99);
 
   await scheduler.release('ws-1');
   assert.equal(stateStore.getWorkspaceLocation('ws-1'), null);
 });
 
 test('Worker registry marks nodes offline when heartbeat expires', () => {
-  let now = 1_000;
-  const registry = new InMemoryWorkerRegistry({ heartbeatTimeoutMs: 5000, now: () => now });
+  let simulatedTime = 1_000;
+  const registry = new InMemoryWorkerRegistry({ heartbeatTimeoutMs: 5000, now: () => simulatedTime });
   registry.register({ id: 'worker-1', cpuAvailable: 50, memoryAvailable: 50, diskAvailable: 50, workspaceCount: 0, status: NodeStatus.Healthy });
 
-  now += 2000;
+  simulatedTime += 2000;
   registry.heartbeat('worker-1', { cpu: 48, memory: 49, disk: 47, workspaces: 1 });
   assert.equal(registry.get('worker-1')?.status, NodeStatus.Healthy);
 
-  now += 6000;
+  simulatedTime += 6000;
   assert.equal(registry.get('worker-1')?.status, NodeStatus.Offline);
 });
 
 test('Work queue retries and dead-letters saturated items', () => {
   const queue = new InMemoryWorkQueue({ maxRetries: 1 });
-  const item = queue.enqueue({ kind: 'launch', workspaceId: 'ws-1' });
+  queue.enqueue({ kind: 'launch', workspaceId: 'ws-1' });
 
-  const firstRetry = queue.retry(item, new Error('transient'));
+  const dequeued = queue.dequeue();
+  const firstRetry = queue.retry(dequeued, new Error('transient'));
   assert.equal(firstRetry.attempts, 1);
+  const dequeuedRetry = queue.dequeue();
+  assert.equal(dequeuedRetry.id, firstRetry.id);
 
-  const deadLetter = queue.retry(firstRetry, new Error('still failing'));
+  const deadLetter = queue.retry(dequeuedRetry, new Error('still failing'));
   assert.equal(deadLetter.reason, 'still failing');
   assert.equal(queue.deadLetters.length, 1);
+  assert.equal(queue.queue.length, 0);
+  assert.equal(queue.deadLetters[0].id, firstRetry.id);
 });
 
 test('Migration manager updates workspace ownership', async () => {

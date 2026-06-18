@@ -219,7 +219,7 @@ export class InMemoryWorkQueue {
   retry(item, error = null) {
     const attempts = Number(item.attempts ?? 0) + 1;
     if (attempts > this.maxRetries) {
-      return this.deadLetter({ ...item, attempts }, error?.message ?? String(error ?? 'retry limit exceeded'));
+      return this.deadLetter({ ...item, attempts }, error ? (error.message ?? 'Unknown error') : 'Retry limit exceeded');
     }
 
     const next = { ...item, attempts };
@@ -261,12 +261,20 @@ export class InMemoryClusterStateStore {
     return [...this.nodes.values()].map((node) => ({ ...node }));
   }
 
+  listWorkspaces() {
+    return [...this.workspaces.values()].map((workspace) => ({ ...workspace }));
+  }
+
   saveWorkspaceLocation(location) {
     this.workspaceLocations.set(location.workspaceId, { ...location });
   }
 
   getWorkspaceLocation(workspaceId) {
     return this.workspaceLocations.get(workspaceId) ?? null;
+  }
+
+  listWorkspaceLocations() {
+    return [...this.workspaceLocations.values()].map((location) => ({ ...location }));
   }
 
   removeWorkspaceLocation(workspaceId) {
@@ -278,7 +286,7 @@ export class TenantQuotaManager {
   constructor(options = {}) {
     this.quotas = new Map();
     this.workspaceCounts = new Map();
-    this.defaultQuota = options.defaultQuota ?? { maxWorkspaces: Number.MAX_SAFE_INTEGER, maxCpu: Number.MAX_SAFE_INTEGER, maxMemory: Number.MAX_SAFE_INTEGER };
+    this.defaultQuota = options.defaultQuota ?? { maxWorkspaces: 100, maxCpu: 1_000, maxMemory: 102_400 };
   }
 
   setQuota(tenantId, quota) {
@@ -430,13 +438,10 @@ export class DrainManager {
 
   async drain(workerId) {
     this.registry.setStatus(workerId, NodeStatus.Draining);
-    const locations = [];
-    for (const workspace of this.stateStore.workspaces.values()) {
-      const location = this.stateStore.getWorkspaceLocation(workspace.workspaceId);
-      if (location?.nodeId === workerId) {
-        locations.push(workspace.workspaceId);
-      }
-    }
+    const locations = this.stateStore
+      .listWorkspaceLocations()
+      .filter((location) => location.nodeId === workerId)
+      .map((location) => location.workspaceId);
 
     return {
       workerId,
@@ -448,17 +453,32 @@ export class DrainManager {
 }
 
 export class Autoscaler {
+  constructor(options = {}) {
+    this.scaleUpCpuThreshold = options.scaleUpCpuThreshold ?? 80;
+    this.scaleUpQueueDepthThreshold = options.scaleUpQueueDepthThreshold ?? 500;
+    this.scaleDownCpuThreshold = options.scaleDownCpuThreshold ?? 20;
+    this.scaleDownIdleMinutesThreshold = options.scaleDownIdleMinutesThreshold ?? 30;
+  }
+
   scaleUp(metrics = {}) {
+    const cpuExceeded = metrics.cpuUsage > this.scaleUpCpuThreshold;
+    const queueExceeded = metrics.queueDepth > this.scaleUpQueueDepthThreshold;
+    const shouldScaleUp = cpuExceeded || queueExceeded;
+
     return {
-      action: metrics.cpuUsage > 80 || metrics.queueDepth > 500 ? 'scale_up' : 'stable',
-      reason: metrics.cpuUsage > 80 ? 'cpu_threshold' : metrics.queueDepth > 500 ? 'queue_depth' : 'within_threshold'
+      action: shouldScaleUp ? 'scale_up' : 'stable',
+      reason: cpuExceeded ? 'cpu_threshold' : queueExceeded ? 'queue_depth' : 'within_threshold'
     };
   }
 
   scaleDown(metrics = {}) {
+    const isBelowCpu = metrics.cpuUsage < this.scaleDownCpuThreshold;
+    const isIdleLongEnough = metrics.idleMinutes >= this.scaleDownIdleMinutesThreshold;
+    const shouldScaleDown = isBelowCpu && isIdleLongEnough;
+
     return {
-      action: metrics.cpuUsage < 20 && metrics.idleMinutes >= 30 ? 'scale_down' : 'stable',
-      reason: metrics.cpuUsage < 20 && metrics.idleMinutes >= 30 ? 'sustained_low_utilization' : 'within_threshold'
+      action: shouldScaleDown ? 'scale_down' : 'stable',
+      reason: shouldScaleDown ? 'sustained_low_utilization' : 'within_threshold'
     };
   }
 }

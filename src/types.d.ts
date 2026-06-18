@@ -448,8 +448,13 @@ export interface WorkQueue {
 export interface ClusterStateStore {
   saveWorkspace(workspace: { workspaceId: string; tenantId?: string; resources?: WorkspaceLaunchRequest['resources'] }): void;
   getWorkspace(workspaceId: string): { workspaceId: string; tenantId?: string; resources?: WorkspaceLaunchRequest['resources'] } | null;
+  listWorkspaces(): { workspaceId: string; tenantId?: string; resources?: WorkspaceLaunchRequest['resources'] }[];
   saveNode(node: WorkerNode): void;
   getNodes(): WorkerNode[];
+  saveWorkspaceLocation(location: WorkspaceLocation): void;
+  getWorkspaceLocation(workspaceId: string): WorkspaceLocation | null;
+  listWorkspaceLocations(): WorkspaceLocation[];
+  removeWorkspaceLocation(workspaceId: string): void;
 }
 
 export interface WorkspaceLocation {
