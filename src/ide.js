@@ -36,6 +36,19 @@ function runCommand(command, args, options = {}) {
   });
 }
 
+function sanitizeGitArg(value, label, pattern = /^[A-Za-z0-9._/:+-]+$/) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Missing ${label}`);
+  }
+  if (value.startsWith('-')) {
+    throw new Error(`Invalid ${label}`);
+  }
+  if (!pattern.test(value)) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return value;
+}
+
 export class InMemoryIdeProvider {
   constructor() {
     this.sessions = new Map();
@@ -199,27 +212,27 @@ export class WorkspaceGitService {
   }
 
   async push(workspaceId, remote = 'origin', branch) {
-    const args = ['push', remote];
+    const args = ['push', '--', sanitizeGitArg(remote, 'remote', /^[A-Za-z0-9._/-]+$/)];
     if (branch) {
-      args.push(branch);
+      args.push(sanitizeGitArg(branch, 'branch', /^[A-Za-z0-9._/-]+$/));
     }
     return this.#git(workspaceId, args);
   }
 
   async pull(workspaceId, remote = 'origin', branch) {
-    const args = ['pull', remote];
+    const args = ['pull', '--', sanitizeGitArg(remote, 'remote', /^[A-Za-z0-9._/-]+$/)];
     if (branch) {
-      args.push(branch);
+      args.push(sanitizeGitArg(branch, 'branch', /^[A-Za-z0-9._/-]+$/));
     }
     return this.#git(workspaceId, args);
   }
 
   async branch(workspaceId, name) {
-    return this.#git(workspaceId, ['branch', name]);
+    return this.#git(workspaceId, ['branch', '--', sanitizeGitArg(name, 'branch name', /^[A-Za-z0-9._/-]+$/)]);
   }
 
   async checkout(workspaceId, ref) {
-    return this.#git(workspaceId, ['checkout', ref]);
+    return this.#git(workspaceId, ['checkout', '--', sanitizeGitArg(ref, 'ref')]);
   }
 }
 
