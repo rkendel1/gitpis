@@ -1,14 +1,24 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+function normalizeSandboxPath(value) {
+  if (process.platform === 'win32') {
+    return value.toLowerCase();
+  }
+  return value;
+}
+
 export class WorkspaceFileSystem {
   constructor(rootDir) {
-    this.rootDir = rootDir;
+    this.rootDir = path.resolve(rootDir);
   }
 
   resolve(userPath = '.') {
     const resolved = path.resolve(this.rootDir, userPath);
-    if (!resolved.startsWith(path.resolve(this.rootDir))) {
+    const normalizedRoot = normalizeSandboxPath(this.rootDir);
+    const normalizedResolved = normalizeSandboxPath(resolved);
+    const rootWithSep = `${normalizedRoot}${path.sep}`;
+    if (normalizedResolved !== normalizedRoot && !normalizedResolved.startsWith(rootWithSep)) {
       throw new Error('Path escapes workspace sandbox');
     }
     return resolved;
@@ -22,6 +32,14 @@ export class WorkspaceFileSystem {
     const resolved = this.resolve(filePath);
     await fs.mkdir(path.dirname(resolved), { recursive: true });
     await fs.writeFile(resolved, content);
+  }
+
+  async mkdir(dirPath) {
+    await fs.mkdir(this.resolve(dirPath), { recursive: true });
+  }
+
+  async remove(targetPath) {
+    await fs.rm(this.resolve(targetPath), { recursive: true, force: true });
   }
 
   async list(dir = '.') {

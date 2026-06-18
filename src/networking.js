@@ -6,8 +6,10 @@ export function derivePorts(framework, executionPlan) {
     {
       port: defaultPort,
       protocol,
+      publicUrl: `http://localhost:${defaultPort}`,
       visibility: 'public',
-      route: `/${defaultPort}`
+      route: `/${defaultPort}`,
+      framework
     }
   ];
 }
