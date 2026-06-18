@@ -7,7 +7,7 @@ import { RuntimeProviderRegistry, NodeRuntimeProvider, WasmtimeProvider, default
 import { WorkspaceFileSystem } from './filesystem.js';
 import { FilesystemJournal, LocalSnapshotStorageProvider, SnapshotEngine } from './persistence.js';
 import { NetworkingManager } from './networking.js';
-import { InMemoryIdeProvider, WorkspaceFileService, WorkspaceTerminalService, WorkspaceGitService, WorkspaceSocket } from './ide.js';
+import { InMemoryIdeProvider, WorkspaceFileService, WorkspaceTerminalService, WorkspaceGitService, WorkspaceSocket, IdeEventBus, FileRevisionStore, InMemoryLspGateway, IdeStateManager } from './ide.js';
 
 const WORKSPACE_BASE = path.resolve('.wasm-workspaces');
 const RUNTIME_DIR = 'runtime';
@@ -51,9 +51,20 @@ export class InMemoryWasmWorkspace {
       compression: options.snapshotCompression ?? 'zstd'
     });
     this.ideProvider = options.ideProvider ?? new InMemoryIdeProvider();
-    this.fileServiceLayer = options.fileService ?? new WorkspaceFileService(this);
-    this.terminalServiceLayer = options.terminalService ?? new WorkspaceTerminalService(this);
-    this.gitServiceLayer = options.gitService ?? new WorkspaceGitService(this);
+    this.ideEventBusLayer = options.ideEventBus ?? new IdeEventBus();
+    this.fileRevisionStoreLayer = options.fileRevisionStore ?? new FileRevisionStore();
+    this.lspGatewayLayer = options.lspGateway ?? new InMemoryLspGateway();
+    this.ideStateManagerLayer = options.ideStateManager ?? new IdeStateManager();
+    this.fileServiceLayer = options.fileService ?? new WorkspaceFileService(this, {
+      eventBus: this.ideEventBusLayer,
+      revisionStore: this.fileRevisionStoreLayer
+    });
+    this.terminalServiceLayer = options.terminalService ?? new WorkspaceTerminalService(this, {
+      eventBus: this.ideEventBusLayer
+    });
+    this.gitServiceLayer = options.gitService ?? new WorkspaceGitService(this, {
+      eventBus: this.ideEventBusLayer
+    });
     this.socketGateway = options.workspaceSocket ?? new WorkspaceSocket();
   }
 
@@ -406,6 +417,33 @@ export class InMemoryWasmWorkspace {
 
   workspaceSocket() {
     return this.socketGateway;
+  }
+
+  ideEventBus() {
+    return this.ideEventBusLayer;
+  }
+
+  ideEvents(workspaceId, fromTimestamp = 0) {
+    return this.ideEventBusLayer.replay(workspaceId, fromTimestamp);
+  }
+
+  appendIdeEvent(workspaceId, type, payload = {}) {
+    this.#mustGetWorkspace(workspaceId);
+    return this.ideEventBusLayer.append(workspaceId, type, payload);
+  }
+
+  lspGateway() {
+    return this.lspGatewayLayer;
+  }
+
+  ideState(workspaceId) {
+    this.#mustGetWorkspace(workspaceId);
+    return this.ideStateManagerLayer.snapshot(workspaceId);
+  }
+
+  updateIdeState(workspaceId, patch) {
+    this.#mustGetWorkspace(workspaceId);
+    return this.ideStateManagerLayer.update(workspaceId, patch);
   }
 
   #mustGetWorkspace(id) {

@@ -84,6 +84,45 @@ export function createRestServer(options = {}) {
         return;
       }
 
+      if (fileMatch && req.method === 'POST') {
+        const [, id] = fileMatch;
+        const body = await readBody(req);
+        if (!body.path) {
+          json(res, 400, { error: 'Missing file path' });
+          return;
+        }
+        const fileService = workspace.fileService();
+        await fileService.createFile(id, body.path, body.content ?? '');
+        json(res, 201, { ok: true, path: body.path });
+        return;
+      }
+
+      if (fileMatch && req.method === 'DELETE') {
+        const [, id] = fileMatch;
+        const body = await readBody(req);
+        if (!body.path) {
+          json(res, 400, { error: 'Missing file path' });
+          return;
+        }
+        const fileService = workspace.fileService();
+        await fileService.deleteFile(id, body.path);
+        json(res, 200, { ok: true });
+        return;
+      }
+
+      if (fileMatch && req.method === 'PATCH') {
+        const [, id] = fileMatch;
+        const body = await readBody(req);
+        if (!body.path || !body.newPath) {
+          json(res, 400, { error: 'Missing path or newPath' });
+          return;
+        }
+        const fileService = workspace.fileService();
+        await fileService.renameFile(id, body.path, body.newPath);
+        json(res, 200, { ok: true, path: body.newPath });
+        return;
+      }
+
       const terminalMatch = pathname.match(/^\/workspaces\/([^/]+)\/terminal$/);
       if (terminalMatch && req.method === 'POST') {
         const [, id] = terminalMatch;
@@ -99,6 +138,43 @@ export function createRestServer(options = {}) {
           stdin: body.stdin
         });
         json(res, 200, { terminalId: terminal.terminalId, ...result });
+        return;
+      }
+
+      // Terminal session lifecycle (create once, execute many)
+      const terminalsMatch = pathname.match(/^\/workspaces\/([^/]+)\/terminals$/);
+      if (terminalsMatch && req.method === 'POST') {
+        const [, id] = terminalsMatch;
+        const body = await readBody(req);
+        const terminalService = workspace.terminalService();
+        const terminal = await terminalService.createTerminal(id, { cwd: body.cwd, env: body.env });
+        json(res, 201, terminal);
+        return;
+      }
+
+      const terminalExecMatch = pathname.match(/^\/workspaces\/([^/]+)\/terminals\/([^/]+)\/exec$/);
+      if (terminalExecMatch && req.method === 'POST') {
+        const [, , terminalId] = terminalExecMatch;
+        const body = await readBody(req);
+        if (!body.command) {
+          json(res, 400, { error: 'Missing command' });
+          return;
+        }
+        const terminalService = workspace.terminalService();
+        const result = await terminalService.execute(terminalId, body.command, body.args ?? [], {
+          cwd: body.cwd,
+          env: body.env,
+          stdin: body.stdin
+        });
+        json(res, 200, result);
+        return;
+      }
+
+      const terminalOutputMatch = pathname.match(/^\/workspaces\/([^/]+)\/terminals\/([^/]+)\/output$/);
+      if (terminalOutputMatch && req.method === 'GET') {
+        const [, , terminalId] = terminalOutputMatch;
+        const terminalService = workspace.terminalService();
+        json(res, 200, terminalService.streamOutput(terminalId));
         return;
       }
 
@@ -129,6 +205,104 @@ export function createRestServer(options = {}) {
         const body = await readBody(req);
         const gitService = workspace.gitService();
         json(res, 200, await gitService.push(id, body.remote ?? 'origin', body.branch));
+        return;
+      }
+
+      // ── IDE Event Bus ─────────────────────────────────────────────────────
+      const ideEventsMatch = pathname.match(/^\/workspaces\/([^/]+)\/ide\/events$/);
+      if (ideEventsMatch && req.method === 'GET') {
+        const [, id] = ideEventsMatch;
+        const fromTimestamp = Number(parsedUrl.searchParams.get('from') ?? 0);
+        json(res, 200, workspace.ideEvents(id, fromTimestamp));
+        return;
+      }
+
+      if (ideEventsMatch && req.method === 'POST') {
+        const [, id] = ideEventsMatch;
+        const body = await readBody(req);
+        if (!body.type) {
+          json(res, 400, { error: 'Missing event type' });
+          return;
+        }
+        const event = workspace.appendIdeEvent(id, body.type, body.payload ?? {});
+        json(res, 201, event);
+        return;
+      }
+
+      // ── IDE State ─────────────────────────────────────────────────────────
+      const ideStateMatch = pathname.match(/^\/workspaces\/([^/]+)\/ide\/state$/);
+      if (ideStateMatch && req.method === 'GET') {
+        const [, id] = ideStateMatch;
+        json(res, 200, workspace.ideState(id) ?? {});
+        return;
+      }
+
+      if (ideStateMatch && req.method === 'PATCH') {
+        const [, id] = ideStateMatch;
+        const body = await readBody(req);
+        json(res, 200, workspace.updateIdeState(id, body));
+        return;
+      }
+
+      // ── LSP Gateway ───────────────────────────────────────────────────────
+      const lspMatch = pathname.match(/^\/workspaces\/([^/]+)\/ide\/lsp$/);
+      if (lspMatch && req.method === 'GET') {
+        const [, id] = lspMatch;
+        json(res, 200, workspace.lspGateway().list(id));
+        return;
+      }
+
+      if (lspMatch && req.method === 'POST') {
+        const [, id] = lspMatch;
+        const body = await readBody(req);
+        if (!body.language) {
+          json(res, 400, { error: 'Missing language' });
+          return;
+        }
+        const server = workspace.lspGateway().startServer(body.language, id);
+        json(res, 201, server);
+        return;
+      }
+
+      const lspServerMatch = pathname.match(/^\/workspaces\/([^/]+)\/ide\/lsp\/([^/]+)$/);
+      if (lspServerMatch && req.method === 'DELETE') {
+        const [, , serverId] = lspServerMatch;
+        workspace.lspGateway().stopServer(serverId);
+        json(res, 200, { ok: true });
+        return;
+      }
+
+      // ── Search ────────────────────────────────────────────────────────────
+      const searchMatch = pathname.match(/^\/workspaces\/([^/]+)\/search$/);
+      if (searchMatch && req.method === 'GET') {
+        const [, id] = searchMatch;
+        const q = parsedUrl.searchParams.get('q') ?? '';
+        if (!q) {
+          json(res, 200, []);
+          return;
+        }
+        const caseSensitive = parsedUrl.searchParams.get('caseSensitive') === 'true';
+        const useRegex = parsedUrl.searchParams.get('regex') === 'true';
+        const filePattern = parsedUrl.searchParams.get('path') || null;
+
+        const terminalService = workspace.terminalService();
+        const terminal = await terminalService.createTerminal(id, {});
+        const grepArgs = ['-r', '-n'];
+        if (!caseSensitive) grepArgs.push('-i');
+        if (useRegex) grepArgs.push('-E');
+        if (filePattern) grepArgs.push(`--include=${filePattern}`);
+        grepArgs.push('--', q, '.');
+        const result = await terminalService.execute(terminal.terminalId, 'grep', grepArgs);
+        const hits = result.stdout
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => {
+            const m = line.match(/^\.?\/?([^:]+):(\d+):(.*)/);
+            if (!m) return null;
+            return { path: m[1], line: parseInt(m[2], 10), column: 0, text: m[3] };
+          })
+          .filter(Boolean);
+        json(res, 200, hits);
         return;
       }
 

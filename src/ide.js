@@ -49,6 +49,195 @@ function sanitizeGitArg(value, label, pattern = /^[A-Za-z0-9._/:+-]+$/) {
   return value;
 }
 
+// ─── IDE Event Protocol ───────────────────────────────────────────────────────
+
+export const IdeEventType = {
+  FileChanged: 'FileChanged',
+  FileCreated: 'FileCreated',
+  FileDeleted: 'FileDeleted',
+  FileRenamed: 'FileRenamed',
+  TerminalOutput: 'TerminalOutput',
+  GitUpdate: 'GitUpdate',
+  CursorMove: 'CursorMove',
+  SessionHeartbeat: 'SessionHeartbeat',
+  LspNotification: 'LspNotification',
+  PresenceUpdate: 'PresenceUpdate'
+};
+
+export class IdeEventBus {
+  constructor() {
+    this._events = [];
+    this._seq = 0;
+    this._emitter = new EventEmitter();
+  }
+
+  append(workspaceId, type, payload = {}) {
+    const event = {
+      id: randomUUID(),
+      workspaceId,
+      type,
+      timestamp: Date.now(),
+      seq: ++this._seq,
+      payload
+    };
+    this._events.push(event);
+    this._emitter.emit('event', event);
+    return event;
+  }
+
+  replay(workspaceId, fromTimestamp = 0) {
+    return this._events.filter(
+      (e) => e.workspaceId === workspaceId && e.timestamp >= fromTimestamp
+    );
+  }
+
+  subscribe(listener) {
+    this._emitter.on('event', listener);
+    return () => this._emitter.off('event', listener);
+  }
+}
+
+// ─── File Revision Model ──────────────────────────────────────────────────────
+
+export class FileRevisionStore {
+  constructor() {
+    this._versions = new Map();
+  }
+
+  _key(workspaceId, filePath) {
+    return `${workspaceId}:${filePath}`;
+  }
+
+  nextVersion(workspaceId, filePath) {
+    const key = this._key(workspaceId, filePath);
+    const v = (this._versions.get(key) ?? 0) + 1;
+    this._versions.set(key, v);
+    return v;
+  }
+
+  currentVersion(workspaceId, filePath) {
+    return this._versions.get(this._key(workspaceId, filePath)) ?? 0;
+  }
+
+  hasConflict(workspaceId, filePath, expectedVersion) {
+    return this.currentVersion(workspaceId, filePath) !== expectedVersion;
+  }
+}
+
+// ─── Editor Sync Adapter ─────────────────────────────────────────────────────
+
+export class MonacoSyncAdapter {
+  constructor(fileService, eventBus) {
+    this._fileService = fileService;
+    this._eventBus = eventBus;
+  }
+
+  async applyRemoteChange(workspaceId, revision) {
+    await this._fileService.writeFile(workspaceId, revision.path, revision.content);
+  }
+
+  emitLocalChange(workspaceId, revision) {
+    this._eventBus.append(workspaceId, IdeEventType.FileChanged, {
+      path: revision.path,
+      version: revision.version,
+      updatedAt: revision.updatedAt
+    });
+  }
+}
+
+// ─── LSP Gateway ─────────────────────────────────────────────────────────────
+
+const LSP_SUPPORTED_LANGUAGES = new Set(['typescript', 'javascript', 'json', 'yaml', 'python']);
+
+export class InMemoryLspGateway {
+  constructor() {
+    this._servers = new Map();
+  }
+
+  startServer(language, workspaceId) {
+    if (!LSP_SUPPORTED_LANGUAGES.has(language)) {
+      throw new Error(`Unsupported LSP language: ${language}`);
+    }
+    const serverId = randomUUID();
+    const server = { serverId, language, workspaceId, startedAt: Date.now() };
+    this._servers.set(serverId, server);
+    return server;
+  }
+
+  async sendRequest(serverId, type, params = {}) {
+    if (!this._servers.has(serverId)) {
+      throw new Error(`LSP server not found: ${serverId}`);
+    }
+    return { serverId, type, result: null };
+  }
+
+  stopServer(serverId) {
+    this._servers.delete(serverId);
+  }
+
+  list(workspaceId) {
+    const all = [...this._servers.values()];
+    return workspaceId ? all.filter((s) => s.workspaceId === workspaceId) : all;
+  }
+}
+
+// ─── IDE State Snapshot ───────────────────────────────────────────────────────
+
+export class IdeStateManager {
+  constructor() {
+    this._states = new Map();
+  }
+
+  update(workspaceId, patch) {
+    const current = this._states.get(workspaceId) ?? {
+      openFiles: [],
+      activeTerminal: null,
+      gitBranch: null,
+      cursorPositions: {}
+    };
+    this._states.set(workspaceId, { ...current, ...patch });
+    return this._states.get(workspaceId);
+  }
+
+  snapshot(workspaceId) {
+    return this._states.get(workspaceId) ?? null;
+  }
+}
+
+// ─── WebSocket Channel Constants ──────────────────────────────────────────────
+
+export const IdeChannels = {
+  Files: 'files',
+  Terminal: 'terminal',
+  Git: 'git',
+  Lsp: 'lsp',
+  Presence: 'presence',
+  Events: 'events'
+};
+
+// ─── Git Sandbox Policy ───────────────────────────────────────────────────────
+
+const GIT_BLOCKED_FLAGS = new Set([
+  '--exec',
+  '--upload-pack',
+  '--receive-pack',
+  '--ext-diff',
+  '--no-index'
+]);
+
+function enforceGitSandbox(args) {
+  for (const arg of args) {
+    if (GIT_BLOCKED_FLAGS.has(arg)) {
+      throw new Error(`Blocked git argument: ${arg}`);
+    }
+    if (/^--(?:exec|upload-pack|receive-pack|ext-diff)=/.test(arg)) {
+      throw new Error(`Blocked git argument: ${arg}`);
+    }
+  }
+}
+
+// ─── Core Services ────────────────────────────────────────────────────────────
+
 export class InMemoryIdeProvider {
   constructor() {
     this.sessions = new Map();
@@ -71,9 +260,11 @@ export class InMemoryIdeProvider {
 }
 
 export class WorkspaceFileService {
-  constructor(workspaceRuntime) {
+  constructor(workspaceRuntime, options = {}) {
     this.workspaceRuntime = workspaceRuntime;
     this.watchers = new Map();
+    this.eventBus = options.eventBus ?? null;
+    this.revisionStore = options.revisionStore ?? new FileRevisionStore();
   }
 
   async readFile(workspaceId, filePath, encoding = 'utf8') {
@@ -82,24 +273,46 @@ export class WorkspaceFileService {
   }
 
   async writeFile(workspaceId, filePath, content) {
+    // write-ahead: log the intent before persisting
+    const version = this.revisionStore.nextVersion(workspaceId, filePath);
+    this.eventBus?.append(workspaceId, IdeEventType.FileChanged, {
+      path: filePath,
+      version,
+      updatedAt: Date.now()
+    });
     const filesystem = await this.workspaceRuntime.filesystem(workspaceId);
     await filesystem.writeFile(filePath, content);
-    this.#emit(workspaceId, { type: 'FileModified', path: filePath, timestamp: new Date().toISOString() });
+    this.#emit(workspaceId, { type: 'FileModified', path: filePath, timestamp: new Date().toISOString(), version });
   }
 
   async createFile(workspaceId, filePath, content = '') {
+    const version = this.revisionStore.nextVersion(workspaceId, filePath);
+    this.eventBus?.append(workspaceId, IdeEventType.FileCreated, {
+      path: filePath,
+      version,
+      updatedAt: Date.now()
+    });
     const filesystem = await this.workspaceRuntime.filesystem(workspaceId);
     await filesystem.createFile(filePath, content);
-    this.#emit(workspaceId, { type: 'FileCreated', path: filePath, timestamp: new Date().toISOString() });
+    this.#emit(workspaceId, { type: 'FileCreated', path: filePath, timestamp: new Date().toISOString(), version });
   }
 
   async deleteFile(workspaceId, filePath) {
+    this.eventBus?.append(workspaceId, IdeEventType.FileDeleted, {
+      path: filePath,
+      updatedAt: Date.now()
+    });
     const filesystem = await this.workspaceRuntime.filesystem(workspaceId);
     await filesystem.remove(filePath);
     this.#emit(workspaceId, { type: 'FileDeleted', path: filePath, timestamp: new Date().toISOString() });
   }
 
   async renameFile(workspaceId, fromPath, toPath) {
+    this.eventBus?.append(workspaceId, IdeEventType.FileRenamed, {
+      path: fromPath,
+      nextPath: toPath,
+      updatedAt: Date.now()
+    });
     const filesystem = await this.workspaceRuntime.filesystem(workspaceId);
     await filesystem.rename(fromPath, toPath);
     this.#emit(workspaceId, {
@@ -128,9 +341,10 @@ export class WorkspaceFileService {
 }
 
 export class WorkspaceTerminalService {
-  constructor(workspaceRuntime) {
+  constructor(workspaceRuntime, options = {}) {
     this.workspaceRuntime = workspaceRuntime;
     this.terminals = new Map();
+    this.eventBus = options.eventBus ?? null;
   }
 
   async createTerminal(workspaceId, options = {}) {
@@ -142,6 +356,7 @@ export class WorkspaceTerminalService {
       terminalId: randomUUID(),
       workspaceId,
       cwd: options.cwd ? path.resolve(workspace.repoPath, options.cwd) : workspace.repoPath,
+      env: options.env ?? {},
       createdAt: new Date().toISOString(),
       lastOutput: []
     };
@@ -154,17 +369,29 @@ export class WorkspaceTerminalService {
     if (!terminal) {
       throw new Error(`Terminal not found: ${terminalId}`);
     }
+    const startedAt = Date.now();
     const result = await runCommand(command, args, {
       cwd: options.cwd ? path.resolve(terminal.cwd, options.cwd) : terminal.cwd,
-      env: options.env,
+      env: { ...terminal.env, ...options.env },
       stdin: options.stdin
     });
-    terminal.lastOutput.push({
-      timestamp: new Date().toISOString(),
-      stdin: options.stdin ?? null,
+    const finishedAt = Date.now();
+    const record = {
+      command,
+      args,
+      exitCode: result.code,
       stdout: result.stdout,
       stderr: result.stderr,
-      exitCode: result.code
+      startedAt,
+      finishedAt
+    };
+    terminal.lastOutput.push(record);
+    this.eventBus?.append(terminal.workspaceId, IdeEventType.TerminalOutput, {
+      terminalId,
+      command,
+      exitCode: result.code,
+      startedAt,
+      finishedAt
     });
     return result;
   }
@@ -179,8 +406,9 @@ export class WorkspaceTerminalService {
 }
 
 export class WorkspaceGitService {
-  constructor(workspaceRuntime) {
+  constructor(workspaceRuntime, options = {}) {
     this.workspaceRuntime = workspaceRuntime;
+    this.eventBus = options.eventBus ?? null;
   }
 
   #workspacePath(workspaceId) {
@@ -192,7 +420,13 @@ export class WorkspaceGitService {
   }
 
   async #git(workspaceId, args) {
-    return runCommand('git', args, { cwd: this.#workspacePath(workspaceId) });
+    enforceGitSandbox(args);
+    const result = await runCommand('git', args, { cwd: this.#workspacePath(workspaceId) });
+    this.eventBus?.append(workspaceId, IdeEventType.GitUpdate, {
+      op: args[0],
+      ok: result.ok
+    });
+    return result;
   }
 
   async status(workspaceId) {

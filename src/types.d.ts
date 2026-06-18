@@ -617,3 +617,120 @@ export interface MetricsCollector {
   collect(metric: Record<string, unknown>): void;
   aggregate(): { samples: number; totals: Record<string, number> };
 }
+
+// ─── IDE Event Protocol ───────────────────────────────────────────────────────
+
+export type IdeEventType =
+  | 'FileChanged'
+  | 'FileCreated'
+  | 'FileDeleted'
+  | 'FileRenamed'
+  | 'TerminalOutput'
+  | 'GitUpdate'
+  | 'CursorMove'
+  | 'SessionHeartbeat'
+  | 'LspNotification'
+  | 'PresenceUpdate';
+
+export interface IdeEvent {
+  id: string;
+  workspaceId: string;
+  type: IdeEventType;
+  timestamp: number;
+  seq: number;
+  payload: Record<string, unknown>;
+}
+
+export interface IdeEventBus {
+  append(workspaceId: string, type: IdeEventType, payload?: Record<string, unknown>): IdeEvent;
+  replay(workspaceId: string, fromTimestamp?: number): IdeEvent[];
+  subscribe(listener: (event: IdeEvent) => void): () => void;
+}
+
+// ─── File Revision Model ──────────────────────────────────────────────────────
+
+export interface FileRevision {
+  path: string;
+  content?: string;
+  version: number;
+  updatedAt: number;
+}
+
+export interface FileConflictResolver {
+  resolve(local: FileRevision, remote: FileRevision): FileRevision;
+}
+
+export interface FileRevisionStore {
+  nextVersion(workspaceId: string, filePath: string): number;
+  currentVersion(workspaceId: string, filePath: string): number;
+  hasConflict(workspaceId: string, filePath: string, expectedVersion: number): boolean;
+}
+
+// ─── Editor Sync Adapter ─────────────────────────────────────────────────────
+
+export interface EditorSyncAdapter {
+  applyRemoteChange(workspaceId: string, revision: FileRevision): Promise<void>;
+  emitLocalChange(workspaceId: string, revision: FileRevision): void;
+}
+
+// ─── Terminal Command Model ───────────────────────────────────────────────────
+
+export interface TerminalCommand {
+  command: string;
+  args: string[];
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  startedAt: number;
+  finishedAt: number;
+}
+
+// ─── Git Sandbox Policy ───────────────────────────────────────────────────────
+
+export interface GitSandboxPolicy {
+  allowedCommands: string[];
+  blockedFlags: string[];
+}
+
+// ─── LSP Gateway ─────────────────────────────────────────────────────────────
+
+export interface LspServer {
+  serverId: string;
+  language: string;
+  workspaceId: string;
+  startedAt: number;
+}
+
+export interface LspGateway {
+  startServer(language: string, workspaceId: string): LspServer;
+  sendRequest(serverId: string, type: string, params?: Record<string, unknown>): Promise<{ serverId: string; type: string; result: unknown }>;
+  stopServer(serverId: string): void;
+  list(workspaceId?: string): LspServer[];
+}
+
+// ─── IDE State Snapshot ───────────────────────────────────────────────────────
+
+export interface IdeStateSnapshot {
+  openFiles: string[];
+  activeTerminal: string | null;
+  gitBranch: string | null;
+  cursorPositions: Record<string, { line: number; column: number }>;
+}
+
+export interface IdeStateManager {
+  update(workspaceId: string, patch: Partial<IdeStateSnapshot>): IdeStateSnapshot;
+  snapshot(workspaceId: string): IdeStateSnapshot | null;
+}
+
+// ─── Presence ─────────────────────────────────────────────────────────────────
+
+export interface PresenceEvent {
+  userId: string;
+  workspaceId: string;
+  file: string;
+  cursor: { line: number; column: number };
+}
+
+// ─── WebSocket Channel Constants ──────────────────────────────────────────────
+
+export type IdeChannel = 'files' | 'terminal' | 'git' | 'lsp' | 'presence' | 'events';
