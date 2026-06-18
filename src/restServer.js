@@ -1,7 +1,21 @@
 import http from 'node:http';
-import { createWasmWorkspace } from './index.js';
+import { createWasmWorkspace, createClusterScheduler, WorkerAgent, NodeStatus } from './index.js';
 
 const workspace = createWasmWorkspace();
+const cluster = createClusterScheduler();
+const workerId = 'worker-local';
+const workerAgent = new WorkerAgent({ workerId, runtime: workspace });
+
+cluster.registry.register({
+  id: workerId,
+  cpuAvailable: 100,
+  memoryAvailable: 100,
+  diskAvailable: 100,
+  workspaceCount: 0,
+  status: NodeStatus.Healthy,
+  address: '127.0.0.1'
+});
+cluster.stateStore.saveNode(cluster.registry.get(workerId));
 
 function json(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -35,9 +49,94 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'GET' && req.url === '/cluster/nodes') {
+      json(res, 200, cluster.registry.list());
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/cluster/workspaces') {
+      const locationIndex = new Map(
+        cluster.stateStore.listWorkspaceLocations().map((location) => [location.workspaceId, location.nodeId])
+      );
+      const workspaces = workspace.list().map((item) => ({
+        workspaceId: item.id,
+        nodeId: locationIndex.get(item.id) ?? workerId,
+        status: item.status
+      }));
+      json(res, 200, workspaces);
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/cluster/health') {
+      const nodes = cluster.registry.list();
+      json(res, 200, {
+        nodes: {
+          total: nodes.length,
+          healthy: nodes.filter((node) => node.status === NodeStatus.Healthy).length,
+          draining: nodes.filter((node) => node.status === NodeStatus.Draining).length,
+          offline: nodes.filter((node) => node.status === NodeStatus.Offline).length
+        },
+        queueDepth: cluster.workQueue.queue.length,
+        workspaces: workspace.list().length
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/cluster/metrics') {
+      cluster.metricsCollector.collect({
+        cpu: cluster.registry.get(workerId)?.cpuAvailable ?? 0,
+        memory: cluster.registry.get(workerId)?.memoryAvailable ?? 0,
+        workspaceCount: workspace.list().length
+      });
+      json(res, 200, cluster.metricsCollector.aggregate());
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/internal/workspaces') {
+      const body = await readBody(req);
+      const launched = await workerAgent.createWorkspace({ repoUrl: body.repoUrl });
+      const assignment = await cluster.scheduler.schedule({
+        workspaceId: launched.id,
+        tenantId: body.tenantId,
+        repoUrl: body.repoUrl,
+        resources: body.resources
+      });
+      cluster.stateStore.saveWorkspaceLocation({ workspaceId: launched.id, nodeId: assignment.nodeId });
+      json(res, 201, { workspaceId: launched.id, workerId: assignment.workerId, workspace: launched });
+      return;
+    }
+
+    const internalMatch = req.url?.match(/^\/internal\/workspaces\/([^/]+)(?:\/(restart))?$/);
+    if (internalMatch) {
+      const [, id, action] = internalMatch;
+      if (!action && req.method === 'GET') {
+        const ws = await workerAgent.getWorkspace(id);
+        if (!ws) {
+          json(res, 404, { error: 'Not found' });
+          return;
+        }
+        json(res, 200, ws);
+        return;
+      }
+
+      if (!action && req.method === 'DELETE') {
+        await workerAgent.deleteWorkspace(id);
+        await cluster.scheduler.release(id);
+        json(res, 200, { ok: true });
+        return;
+      }
+
+      if (action === 'restart' && req.method === 'POST') {
+        const restarted = await workerAgent.restartWorkspace(id);
+        json(res, 200, restarted);
+        return;
+      }
+    }
+
     if (req.method === 'POST' && req.url === '/workspaces') {
       const body = await readBody(req);
       const launched = await workspace.launch(body.repoUrl);
+      cluster.stateStore.saveWorkspaceLocation({ workspaceId: launched.id, nodeId: workerId });
       json(res, 201, launched);
       return;
     }
