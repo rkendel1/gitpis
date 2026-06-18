@@ -25,7 +25,9 @@ test('NetworkingManager custom domains can be verified', async () => {
   await manager.allocateRoute('workspace-custom', 3000);
   const domain = await manager.addCustomDomain('workspace-custom', 'my-app.com');
   assert.equal(domain.status, 'pending');
+  assert.equal(domain.domain, 'my-app.com');
   const verified = await manager.verifyDomain('my-app.com');
   assert.equal(verified.status, 'verified');
+  assert.equal(verified.domain, 'my-app.com');
   assert.equal((await manager.domains('workspace-custom')).length, 1);
 });
