@@ -289,6 +289,9 @@ export interface WasmWorkspace {
   networkRoutes(): Promise<Route[]>;
   networkStats(): Promise<Record<string, number>>;
   health(id: string): Promise<WorkspaceHealth>;
+  repairs(id?: string): RepairHistory[];
+  diagnostics(): { workspaceId: string; diagnosis: Diagnosis; timestamp: string }[];
+  workspaceHealthScore(id: string): Promise<WorkspaceHealthScore>;
 }
 
 export interface RepositoryAnalysis {
@@ -304,6 +307,135 @@ export interface Repository extends RepositoryAnalysis {
     start: string;
     defaultPort: number;
   };
+}
+
+export type FailureCategory =
+  | 'DependencyFailure'
+  | 'MissingFile'
+  | 'MissingScript'
+  | 'BuildFailure'
+  | 'RuntimeFailure'
+  | 'NetworkFailure'
+  | 'PortFailure'
+  | 'FrameworkMismatch'
+  | 'ConfigurationFailure'
+  | 'EnvironmentFailure'
+  | 'Unknown';
+
+export type Severity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface LaunchFailure {
+  stage?: string;
+  reason: string;
+  logs: string[];
+}
+
+export interface Diagnosis {
+  category: FailureCategory;
+  severity: Severity;
+  confidence: number;
+  rootCause: string;
+  evidence: string[];
+  suggestedActions: string[];
+}
+
+export interface RepairAction {
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface RepairPlan {
+  workspaceId: string | null;
+  category: FailureCategory;
+  confidence: number;
+  actions: RepairAction[];
+  summary: string;
+}
+
+export interface RepairResult {
+  success: boolean;
+  applied: boolean;
+  error?: string;
+  changes?: Array<{ file: string; change: string }>;
+}
+
+export interface ValidationResult {
+  success: boolean;
+  launch: { ok: boolean };
+  build: { ok: boolean };
+  runtime: { ok: boolean };
+  routing: { ok: boolean };
+}
+
+export interface RepairHistory {
+  workspaceId: string;
+  diagnosis: Diagnosis;
+  repairPlan: RepairPlan;
+  result: RepairResult;
+  validation?: ValidationResult;
+  timestamp: string;
+}
+
+export interface WorkspaceHealthScore {
+  workspaceId: string;
+  score: number;
+  dependencyHealth: number;
+  buildHealth: number;
+  runtimeHealth: number;
+  routeHealth: number;
+}
+
+export interface RecoveryEngine {
+  maxAttempts: number;
+  diagnose(failure: LaunchFailure): Promise<Diagnosis>;
+  generateRepair(diagnosis: Diagnosis, context?: Record<string, unknown>): Promise<RepairPlan>;
+  executeRepair(plan: RepairPlan, context?: Record<string, unknown>): Promise<RepairResult>;
+  validateRepair(workspaceId: string, context?: Record<string, unknown>): Promise<ValidationResult>;
+  recordHistory(entry: Omit<RepairHistory, 'timestamp'>): void;
+  getHistory(workspaceId: string): RepairHistory[];
+  getAllHistory(): RepairHistory[];
+  getDiagnostics(): Array<{ workspaceId: string; diagnosis: Diagnosis; timestamp: string }>;
+  getTelemetry(): Record<string, unknown>;
+}
+
+export interface LogAnalyzer {
+  analyze(logs: string[], failure?: LaunchFailure): Promise<Diagnosis>;
+}
+
+export interface RepositoryValidator {
+  validate(repo: RepositoryAnalysis): Promise<{
+    valid: boolean;
+    checks: {
+      packageJsonExists: boolean;
+      entrypointExists: boolean;
+      frameworkConsistent: boolean;
+      lockfileValid: boolean;
+    };
+    issues: string[];
+  }>;
+}
+
+export interface BuildRepairEngine {
+  diagnoseBuildFailure(failure: LaunchFailure): Promise<Diagnosis>;
+  generateBuildFix(diagnosis: Diagnosis): Promise<RepairPlan>;
+  validateBuildFix(workspaceId: string): Promise<ValidationResult>;
+}
+
+export interface EnvironmentRecovery {
+  detectMissingVariables(workspaceId: string): Promise<string[]>;
+  createDefaults(missingVariables: string[]): Promise<Record<string, string>>;
+  injectVariables(workspaceId: string, variables: Record<string, string>): Promise<void>;
+}
+
+export interface ValidationEngine {
+  validateLaunch(workspaceId: string): Promise<{ ok: boolean }>;
+  validateBuild(workspaceId: string): Promise<{ ok: boolean }>;
+  validateRuntime(workspace: Workspace): Promise<{ ok: boolean }>;
+  validateRouting(routes: Route[]): Promise<{ ok: boolean }>;
+}
+
+export interface RepairAdvisor {
+  advise(diagnosis: Diagnosis, context?: Record<string, unknown>): Promise<RepairPlan>;
 }
 
 export interface BuildArtifact {

@@ -8,6 +8,7 @@ import { WorkspaceFileSystem } from './filesystem.js';
 import { FilesystemJournal, LocalSnapshotStorageProvider, SnapshotEngine } from './persistence.js';
 import { NetworkingManager } from './networking.js';
 import { InMemoryIdeProvider, WorkspaceFileService, WorkspaceTerminalService, WorkspaceGitService, WorkspaceSocket } from './ide.js';
+import { RecoveryEngine } from './recovery.js';
 
 const WORKSPACE_BASE = path.resolve('.wasm-workspaces');
 const RUNTIME_DIR = 'runtime';
@@ -55,6 +56,7 @@ export class InMemoryWasmWorkspace {
     this.terminalServiceLayer = options.terminalService ?? new WorkspaceTerminalService(this);
     this.gitServiceLayer = options.gitService ?? new WorkspaceGitService(this);
     this.socketGateway = options.workspaceSocket ?? new WorkspaceSocket();
+    this.recoveryEngine = options.recoveryEngine ?? new RecoveryEngine();
   }
 
   async launch(repoUrl) {
@@ -93,41 +95,81 @@ export class InMemoryWasmWorkspace {
     this.workspaceEvents.set(id, []);
     this.#recordEvent(id, 'WorkspaceCreated', { id });
 
-    const artifact = await provider.build({
-      ...analysis,
-      executionPlan,
-      workspaceId: id,
-      resourceLimits: workspace.resourceLimits,
-      onEvent: (event) => this.#recordEvent(id, event.type, event),
-      onHealth: (nextStatus) => {
-        workspace.health = nextStatus;
-        workspace.status = nextStatus;
-      },
-      onPort: (port) => {
-        this.#recordEvent(id, 'PortDiscovered', { id, ...port });
-        this.#syncRoutesForWorkspace(id).catch((error) => {
-          this.#recordEvent(id, 'RouteSyncFailed', { id, reason: error.message });
+    let attempt = 0;
+    while (attempt <= this.recoveryEngine.maxAttempts) {
+      try {
+        const artifact = await provider.build({
+          ...analysis,
+          executionPlan: workspace.executionPlan,
+          workspaceId: id,
+          resourceLimits: workspace.resourceLimits,
+          onEvent: (event) => this.#recordEvent(id, event.type, event),
+          onHealth: (nextStatus) => {
+            workspace.health = nextStatus;
+            workspace.status = nextStatus;
+          },
+          onPort: (port) => {
+            this.#recordEvent(id, 'PortDiscovered', { id, ...port });
+            this.#syncRoutesForWorkspace(id).catch((error) => {
+              this.#recordEvent(id, 'RouteSyncFailed', { id, reason: error.message });
+            });
+          }
         });
+
+        workspace.runtime = artifact.runtime;
+        workspace.packageManager = artifact.packageManager;
+        workspace.dependencyHash = artifact.dependencyHash ?? '';
+        workspace.environmentVariables = { ...(artifact.environment ?? {}) };
+        const runtime = await provider.execute(artifact);
+        this.runtimeInstances.set(id, runtime);
+        await runtime.start();
+        workspace.status = await runtime.health();
+        workspace.health = workspace.status;
+        await this.#syncRoutesForWorkspace(id);
+        return workspace;
+      } catch (error) {
+        workspace.status = WorkspaceStatus.Failed;
+        workspace.health = WorkspaceStatus.Failed;
+        this.#recordEvent(id, 'WorkspaceFailed', { id, reason: error.message });
+
+        if (attempt >= this.recoveryEngine.maxAttempts) {
+          throw error;
+        }
+
+        const diagnosis = await this.recoveryEngine.diagnose({
+          workspaceId: id,
+          reason: error.message,
+          logs: this.getLogs(id),
+          framework: workspace.framework
+        });
+        const repairPlan = await this.recoveryEngine.generateRepair(diagnosis, {
+          workspaceId: id,
+          workspacePath: workspace.repoPath,
+          framework: workspace.framework
+        });
+        const result = await this.recoveryEngine.executeRepair(repairPlan, {
+          workspacePath: workspace.repoPath
+        });
+        const validation = await this.recoveryEngine.validateRepair(id, {
+          workspace,
+          routes: await this.routes(id).catch(() => [])
+        });
+        this.recoveryEngine.recordHistory({
+          workspaceId: id,
+          diagnosis,
+          repairPlan,
+          result,
+          validation
+        });
+        this.#recordEvent(id, 'WorkspaceDiagnosed', { id, diagnosis });
+        this.#recordEvent(id, 'WorkspaceRepairAttempted', { id, diagnosis, repairPlan, result });
+
+        if (!result.success || !result.applied || !validation.success) {
+          throw error;
+        }
+
+        attempt += 1;
       }
-    });
-
-    workspace.runtime = artifact.runtime;
-    workspace.packageManager = artifact.packageManager;
-    workspace.dependencyHash = artifact.dependencyHash ?? '';
-    workspace.environmentVariables = { ...(artifact.environment ?? {}) };
-    const runtime = await provider.execute(artifact);
-    this.runtimeInstances.set(id, runtime);
-
-    try {
-      await runtime.start();
-      workspace.status = await runtime.health();
-      workspace.health = workspace.status;
-      await this.#syncRoutesForWorkspace(id);
-    } catch (error) {
-      workspace.status = WorkspaceStatus.Failed;
-      workspace.health = WorkspaceStatus.Failed;
-      this.#recordEvent(id, 'WorkspaceFailed', { id, reason: error.message });
-      throw error;
     }
 
     return workspace;
@@ -383,6 +425,36 @@ export class InMemoryWasmWorkspace {
     return this.networkingManager.domains(id);
   }
 
+  repairs(id) {
+    if (id) {
+      this.#mustGetWorkspace(id);
+      return this.recoveryEngine.getHistory(id);
+    }
+    return this.recoveryEngine.getAllHistory();
+  }
+
+  diagnostics() {
+    return this.recoveryEngine.getDiagnostics();
+  }
+
+  async workspaceHealthScore(id) {
+    const ws = this.#mustGetWorkspace(id);
+    const routes = await this.routes(id).catch(() => []);
+    const dependencyHealth = ws.dependencyHash ? 100 : 60;
+    const buildHealth = ws.status === WorkspaceStatus.Failed ? 30 : 100;
+    const runtimeHealth = ws.status === WorkspaceStatus.Running ? 100 : ws.status === WorkspaceStatus.Failed ? 20 : 70;
+    const routeHealth = routes.length > 0 ? 100 : 60;
+    const score = Math.round((dependencyHealth + buildHealth + runtimeHealth + routeHealth) / 4);
+    return {
+      workspaceId: id,
+      score,
+      dependencyHealth,
+      buildHealth,
+      runtimeHealth,
+      routeHealth
+    };
+  }
+
   async initializeIdeSession(workspaceId, userId = 'anonymous') {
     this.#mustGetWorkspace(workspaceId);
     return this.ideProvider.initialize(workspaceId, userId);
@@ -470,3 +542,4 @@ export function createWasmWorkspace(options = {}) {
 export { SnapshotEngine, LocalSnapshotStorageProvider, FilesystemJournal } from './persistence.js';
 export * from './ide.js';
 export * from './cluster.js';
+export * from './recovery.js';
