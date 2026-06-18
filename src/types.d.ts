@@ -108,13 +108,50 @@ export interface RuntimeCandidate {
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
+export interface Dependency {
+  name: string;
+  version: string;
+}
+
+export interface DependencyGraph {
+  dependencies: Dependency[];
+  devDependencies: Dependency[];
+  lockfileHash: string;
+  dependencyFingerprint?: string;
+  packageManager: PackageManager;
+}
+
+export interface DependencyResolver {
+  detectManager(workspace: { path: string; topLevelFiles?: string[] }): Promise<PackageManager>;
+  resolve(workspace: { path: string; topLevelFiles?: string[] }): Promise<DependencyGraph>;
+}
+
 export interface DependencyInstaller {
   install(workspace: Workspace): Promise<{ cacheHit: boolean; hash: string; command: string | null }>;
 }
 
 export interface DependencyCache {
+  exists?(key: string): Promise<boolean>;
+  save?(key: string, workspacePath: string, packageManager?: PackageManager): Promise<void>;
   get(hash: string): Promise<{ hash: string; path: string } | null>;
   put(hash: string, workspacePath: string): Promise<void>;
+  restore?(key: string, workspacePath: string, packageManager?: PackageManager): Promise<boolean>;
+}
+
+export interface CacheArtifact {
+  kind: 'dependencies' | 'builds';
+  path: string;
+}
+
+export interface CacheProvider {
+  put(key: string, artifact: CacheArtifact): Promise<void>;
+  get(key: string, kind: CacheArtifact['kind']): Promise<CacheArtifact | null>;
+}
+
+export interface BuildCache {
+  exists(hash: string): Promise<boolean>;
+  restore(hash: string, workspacePath: string): Promise<boolean>;
+  save(hash: string, workspacePath: string): Promise<void>;
 }
 
 export interface EnvironmentProvider {

@@ -112,6 +112,10 @@ test('runtime launch exposes logs, ports, lifecycle, and mounted filesystem', as
     await runtime.restart(ws.id);
     assert.equal(await runtime.health(ws.id), 'running');
 
+    const cacheStats = runtime.cacheStats();
+    assert.equal(typeof cacheStats.dependencyHitRate, 'number');
+    assert.equal(typeof cacheStats.buildHitRate, 'number');
+
     await runtime.stop(ws.id);
     assert.equal((await runtime.health(ws.id)), 'stopped');
   } finally {

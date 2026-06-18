@@ -27,7 +27,8 @@ export class InMemoryWasmWorkspace {
     this.runtimeInstances = new Map();
     this.workspaceEvents = new Map();
     this.registry = new RuntimeProviderRegistry();
-    this.registry.register(new NodeRuntimeProvider());
+    this.nodeProvider = new NodeRuntimeProvider();
+    this.registry.register(this.nodeProvider);
     this.registry.register(new WasmtimeProvider());
     this.runtimeCandidates = defaultRuntimeCandidates();
     this.resourceLimits = options.resourceLimits ?? defaultResourceLimits();
@@ -153,6 +154,16 @@ export class InMemoryWasmWorkspace {
     ws.health = await runtime.health();
     ws.status = ws.health;
     return ws.health;
+  }
+
+  cacheStats() {
+    const stats = this.nodeProvider?.cacheStats?.() ?? {};
+    return {
+      dependencyHitRate: stats.dependencyHitRate ?? 0,
+      buildHitRate: stats.buildHitRate ?? 0,
+      cacheSizeGb: 0,
+      ...stats
+    };
   }
 
   #mustGetWorkspace(id) {
