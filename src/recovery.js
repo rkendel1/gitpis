@@ -202,6 +202,7 @@ export class RecoveryEngine {
     this.repairAdvisor = options.repairAdvisor ?? new RuleBasedAdvisor();
     this.validationEngine = options.validationEngine ?? new ValidationEngine();
     this.maxAttempts = options.maxAttempts ?? 3;
+    this.maxHistorySize = options.maxHistorySize ?? 500;
     this.history = [];
     this.telemetry = {
       RepairAttempts: 0,
@@ -235,7 +236,7 @@ export class RecoveryEngine {
           const raw = await fs.readFile(packageJsonPath, 'utf8');
           const pkg = JSON.parse(raw);
           pkg.scripts = pkg.scripts ?? {};
-          if (!pkg.scripts[action.script]) {
+          if (pkg.scripts[action.script] !== action.command) {
             pkg.scripts[action.script] = action.command;
             await fs.writeFile(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
             applied.push({ file: 'package.json', change: `scripts.${action.script}=${action.command}` });
@@ -270,7 +271,7 @@ export class RecoveryEngine {
 
   recordHistory(entry) {
     this.history.push({ ...entry, timestamp: new Date().toISOString() });
-    if (this.history.length > 500) {
+    if (this.history.length > this.maxHistorySize) {
       this.history.shift();
     }
 

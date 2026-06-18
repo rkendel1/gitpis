@@ -168,7 +168,6 @@ export class InMemoryWasmWorkspace {
           throw error;
         }
 
-        analysis.topLevelFiles = (await analyzeRepository(repoPath)).topLevelFiles;
         attempt += 1;
       }
     }
