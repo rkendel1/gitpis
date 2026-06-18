@@ -100,7 +100,7 @@ export class InMemoryWasmWorkspace {
 
     workspace.runtime = artifact.runtime;
     workspace.packageManager = artifact.packageManager;
-    workspace.dependencyHash = artifact.dependencyHash ?? artifact.dependencyFingerprint ?? '';
+    workspace.dependencyHash = artifact.dependencyHash ?? '';
     workspace.environmentVariables = { ...(artifact.environment ?? {}) };
     const runtime = await provider.execute(artifact);
     this.runtimeInstances.set(id, runtime);
@@ -121,10 +121,8 @@ export class InMemoryWasmWorkspace {
 
   async stop(id) {
     const ws = this.#mustGetWorkspace(id);
-    const runtime = this.runtimeInstances.get(id);
-    if (runtime) {
-      await runtime.stop();
-    }
+    const runtime = this.#mustGetRuntime(id);
+    await runtime.stop();
     ws.status = WorkspaceStatus.Stopped;
     ws.health = WorkspaceStatus.Stopped;
     this.#recordEvent(id, 'WorkspaceStopped', { id });
@@ -132,14 +130,10 @@ export class InMemoryWasmWorkspace {
 
   async restart(id) {
     const ws = this.#mustGetWorkspace(id);
-    const runtime = this.runtimeInstances.get(id);
-    if (runtime) {
-      await runtime.restart();
-      ws.status = await runtime.health();
-      ws.health = ws.status;
-    } else {
-      await this.resume(id);
-    }
+    const runtime = this.#mustGetRuntime(id);
+    await runtime.restart();
+    ws.status = await runtime.health();
+    ws.health = ws.status;
     this.#recordEvent(id, 'WorkspaceRestarted', { id });
     return ws;
   }
@@ -197,7 +191,18 @@ export class InMemoryWasmWorkspace {
   async snapshot(id) {
     const ws = this.#mustGetWorkspace(id);
     const runtime = this.runtimeInstances.get(id);
-    const previousSnapshot = ws.latestSnapshotId ? await this.snapshotEngine.storage.load(ws.latestSnapshotId).catch(() => null) : null;
+    let previousSnapshot = null;
+    if (ws.latestSnapshotId) {
+      try {
+        previousSnapshot = await this.snapshotEngine.storage.load(ws.latestSnapshotId);
+      } catch (error) {
+        this.#recordEvent(id, 'WorkspaceSnapshotMissing', {
+          id,
+          snapshotId: ws.latestSnapshotId,
+          reason: error.message
+        });
+      }
+    }
     const runtimePorts = runtime ? await runtime.ports().catch(() => []) : [];
     const snapshot = await this.snapshotEngine.create(id, {
       workspacePath: ws.repoPath,
@@ -265,7 +270,7 @@ export class InMemoryWasmWorkspace {
 
     ws.runtime = artifact.runtime;
     ws.packageManager = artifact.packageManager ?? ws.packageManager;
-    ws.dependencyHash = artifact.dependencyHash ?? artifact.dependencyFingerprint ?? ws.dependencyHash;
+    ws.dependencyHash = artifact.dependencyHash ?? ws.dependencyHash;
     ws.environmentVariables = { ...(artifact.environment ?? ws.environmentVariables ?? {}) };
 
     const runtime = await provider.execute(artifact);

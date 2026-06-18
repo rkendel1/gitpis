@@ -162,7 +162,7 @@ export class LocalSnapshotStorageProvider {
       const raw = await fs.readFile(metadataPath, 'utf8');
       snapshots.push(JSON.parse(raw));
     }
-    snapshots.sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1));
+    snapshots.sort((a, b) => Number(new Date(b.createdAt)) - Number(new Date(a.createdAt)));
     return snapshots;
   }
 }

@@ -208,10 +208,12 @@ export interface SnapshotEngine {
 }
 
 export interface FilesystemJournal {
-  recordChange(type?: string, target?: string, nextTarget?: string | null): void;
+  recordChange(type: FilesystemOperationType, target: string, nextTarget?: string | null): void;
   replay(handler: (entry: unknown) => void | Promise<void>): Promise<void>;
   compact(maxEntries?: number): void;
 }
+
+export type FilesystemOperationType = 'create' | 'modify' | 'delete' | 'rename';
 
 export interface SnapshotStorageProvider {
   save(snapshot: Snapshot): Promise<void>;
@@ -229,7 +231,13 @@ export interface WorkspaceMetadata {
   dependencyHash: string;
   buildHash: string;
   ports: PortInfo[];
-  launchHistory: Array<Record<string, unknown>>;
+  launchHistory: LaunchRecord[];
+}
+
+export interface LaunchRecord {
+  timestamp: string;
+  status: WorkspaceHealth;
+  details?: Record<string, unknown>;
 }
 
 export interface SnapshotHistory {
