@@ -244,6 +244,30 @@ export function createRestServer(options = {}) {
         return;
       }
 
+      if (req.method === 'GET' && pathname === '/repairs') {
+        json(res, 200, workspace.repairs());
+        return;
+      }
+
+      const repairMatch = pathname.match(/^\/repairs\/([^/]+)$/);
+      if (repairMatch && req.method === 'GET') {
+        const [, workspaceId] = repairMatch;
+        json(res, 200, workspace.repairs(workspaceId));
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/diagnostics') {
+        json(res, 200, workspace.diagnostics());
+        return;
+      }
+
+      const workspaceHealthMatch = pathname.match(/^\/workspace\/([^/]+)\/health$/);
+      if (workspaceHealthMatch && req.method === 'GET') {
+        const [, id] = workspaceHealthMatch;
+        json(res, 200, await workspace.workspaceHealthScore(id));
+        return;
+      }
+
       const restoreMatch = pathname.match(/^\/workspaces\/([^/]+)\/restore\/([^/]+)$/);
       if (restoreMatch && req.method === 'POST') {
         const [, id, snapshotId] = restoreMatch;
