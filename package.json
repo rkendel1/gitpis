@@ -1,0 +1,21 @@
+{
+  "name": "gitpis",
+  "version": "0.1.0",
+  "description": "Gitpod-compatible WASM execution module foundation",
+  "type": "module",
+  "bin": {
+    "gitpis": "./src/cli.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./types": "./src/types.d.ts"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start:api": "node ./src/restServer.js",
+    "start:cli": "node ./src/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
