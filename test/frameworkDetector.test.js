@@ -17,14 +17,22 @@ async function mkTempRepo(structure) {
 
 test('detects nextjs via next.config.js', async () => {
   const repo = await mkTempRepo({ 'next.config.js': 'module.exports = {};' });
-  const framework = await detectFramework(repo);
-  assert.equal(framework, 'nextjs');
+  try {
+    const framework = await detectFramework(repo);
+    assert.equal(framework, 'nextjs');
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
 });
 
 test('falls back to static when no known files exist', async () => {
   const repo = await mkTempRepo({ 'README.md': '# example' });
-  const framework = await detectFramework(repo);
-  assert.equal(framework, 'static');
+  try {
+    const framework = await detectFramework(repo);
+    assert.equal(framework, 'static');
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
 });
 
 test('execution plan includes default port', () => {

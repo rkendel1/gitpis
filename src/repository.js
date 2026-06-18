@@ -40,6 +40,10 @@ export async function cloneRepository(repoUrl, destination) {
   await fs.rm(destination, { recursive: true, force: true });
   await fs.mkdir(path.dirname(destination), { recursive: true });
 
+  if (repoUrl.startsWith('-')) {
+    throw new Error('Invalid repository URL');
+  }
+
   if (repoUrl.startsWith('file://')) {
     await copyRecursive(repoUrl.replace('file://', ''), destination);
     return destination;
@@ -50,7 +54,7 @@ export async function cloneRepository(repoUrl, destination) {
     return destination;
   }
 
-  await runCommand('git', ['clone', '--depth', '1', repoUrl, destination], process.cwd());
+  await runCommand('git', ['clone', '--depth', '1', '--', repoUrl, destination], process.cwd());
   return destination;
 }
 

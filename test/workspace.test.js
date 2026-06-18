@@ -18,20 +18,25 @@ test('launch/stop/restart lifecycle works', async () => {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'gitpis-ws-'));
   const runtime = createWasmWorkspace({ workspaceBase: base });
 
-  const ws = await runtime.launch(repo);
-  assert.equal(ws.framework, 'node');
-  assert.equal(ws.status, 'running');
+  try {
+    const ws = await runtime.launch(repo);
+    assert.equal(ws.framework, 'node');
+    assert.equal(ws.status, 'running');
 
-  const ports = await runtime.ports(ws.id);
-  assert.equal(ports[0].port, 3000);
+    const ports = await runtime.ports(ws.id);
+    assert.equal(ports[0].port, 3000);
 
-  await runtime.stop(ws.id);
-  assert.equal((await runtime.health(ws.id)), 'stopped');
+    await runtime.stop(ws.id);
+    assert.equal((await runtime.health(ws.id)), 'stopped');
 
-  await runtime.restart(ws.id);
-  assert.equal((await runtime.health(ws.id)), 'healthy');
+    await runtime.restart(ws.id);
+    assert.equal((await runtime.health(ws.id)), 'healthy');
 
-  const filesystem = runtime.filesystem(ws.id);
-  const files = await filesystem.list('.');
-  assert.ok(files.includes('package.json'));
+    const filesystem = runtime.filesystem(ws.id);
+    const files = await filesystem.list('.');
+    assert.ok(files.includes('package.json'));
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+    await fs.rm(repo, { recursive: true, force: true });
+  }
 });
