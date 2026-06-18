@@ -1,28 +1,35 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { EventEmitter, on } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { cloneRepository, analyzeRepository } from './repository.js';
 import { detectFramework, generateExecutionPlan } from './frameworkDetector.js';
-import { WorkspaceFileSystem } from './filesystem.js';
-import { derivePorts } from './networking.js';
-import { RuntimeProviderRegistry, WasmtimeProvider, defaultRuntimeCandidates } from './providers.js';
+import { RuntimeProviderRegistry, WasmtimeProvider, defaultRuntimeCandidates, defaultResourceLimits } from './providers.js';
 
 const WORKSPACE_BASE = path.resolve('.wasm-workspaces');
+
+export const WorkspaceStatus = {
+  Starting: 'starting',
+  Running: 'running',
+  Unhealthy: 'unhealthy',
+  Stopped: 'stopped',
+  Failed: 'failed'
+};
 
 export class InMemoryWasmWorkspace {
   constructor(options = {}) {
     this.workspaceBase = options.workspaceBase ?? WORKSPACE_BASE;
     this.workspaces = new Map();
-    this.logsByWorkspace = new Map();
+    this.runtimeInstances = new Map();
+    this.workspaceEvents = new Map();
     this.registry = new RuntimeProviderRegistry();
     this.registry.register(new WasmtimeProvider());
     this.runtimeCandidates = defaultRuntimeCandidates();
+    this.resourceLimits = options.resourceLimits ?? defaultResourceLimits();
   }
 
   async launch(repoUrl) {
     const id = randomUUID();
-    const workspaceRoot = path.join(this.workspaceBase, id, 'repo');
+    const workspaceRoot = path.join(this.workspaceBase, id, 'runtime', 'workspace');
 
     await fs.mkdir(path.dirname(workspaceRoot), { recursive: true });
     const repoPath = await cloneRepository(repoUrl, workspaceRoot);
@@ -36,59 +43,98 @@ export class InMemoryWasmWorkspace {
       throw new Error(`No compatible runtime provider for framework: ${framework}`);
     }
 
-    const artifact = await provider.build({ ...analysis, executionPlan });
-    await provider.execute(artifact);
-
     const workspace = {
       id,
       repoUrl,
       repoPath,
       framework,
       executionPlan,
-      runtime: artifact.runtime,
-      status: 'running',
+      runtime: 'wasmtime',
+      status: WorkspaceStatus.Starting,
       createdAt: new Date().toISOString(),
-      health: 'healthy'
+      health: WorkspaceStatus.Starting,
+      resourceLimits: { ...this.resourceLimits }
     };
 
     this.workspaces.set(id, workspace);
-    this.logsByWorkspace.set(id, new EventEmitter());
-    this.#writeLog(id, `workspace=${id} framework=${framework} runtime=${workspace.runtime} launched`);
+    this.workspaceEvents.set(id, []);
+    this.#recordEvent(id, 'WorkspaceCreated', { id });
+
+    const artifact = await provider.build({
+      ...analysis,
+      executionPlan,
+      workspaceId: id,
+      resourceLimits: workspace.resourceLimits,
+      onEvent: (event) => this.#recordEvent(id, event.type, event),
+      onHealth: (nextStatus) => {
+        workspace.health = nextStatus;
+        workspace.status = nextStatus;
+      },
+      onPort: (port) => {
+        this.#recordEvent(id, 'PortDiscovered', { id, ...port });
+      }
+    });
+
+    workspace.runtime = artifact.runtime;
+    const runtime = await provider.execute(artifact);
+    this.runtimeInstances.set(id, runtime);
+
+    try {
+      await runtime.start();
+      workspace.status = await runtime.health();
+      workspace.health = workspace.status;
+    } catch (error) {
+      workspace.status = WorkspaceStatus.Failed;
+      workspace.health = WorkspaceStatus.Failed;
+      this.#recordEvent(id, 'WorkspaceFailed', { id, reason: error.message });
+      throw error;
+    }
 
     return workspace;
   }
 
   async stop(id) {
     const ws = this.#mustGetWorkspace(id);
-    ws.status = 'stopped';
-    ws.health = 'stopped';
-    this.#writeLog(id, `workspace=${id} stopped`);
+    const runtime = this.#mustGetRuntime(id);
+    await runtime.stop();
+    ws.status = WorkspaceStatus.Stopped;
+    ws.health = WorkspaceStatus.Stopped;
+    this.#recordEvent(id, 'WorkspaceStopped', { id });
   }
 
   async restart(id) {
     const ws = this.#mustGetWorkspace(id);
-    ws.status = 'running';
-    ws.health = 'healthy';
-    this.#writeLog(id, `workspace=${id} restarted`);
+    const runtime = this.#mustGetRuntime(id);
+    await runtime.restart();
+    ws.status = await runtime.health();
+    ws.health = ws.status;
+    this.#recordEvent(id, 'WorkspaceRestarted', { id });
     return ws;
   }
 
-  async *logs(id) {
+  logs(id) {
     this.#mustGetWorkspace(id);
-    const emitter = this.logsByWorkspace.get(id);
-    for await (const [line] of on(emitter, 'log')) {
-      yield String(line);
-    }
+    return this.#mustGetRuntime(id).logs();
+  }
+
+  getLogs(id, limit = 200) {
+    this.#mustGetWorkspace(id);
+    return this.#mustGetRuntime(id).getRecentLogs(limit);
+  }
+
+  async events(id) {
+    this.#mustGetWorkspace(id);
+    return [...(this.workspaceEvents.get(id) ?? [])];
   }
 
   filesystem(id) {
-    const ws = this.#mustGetWorkspace(id);
-    return new WorkspaceFileSystem(ws.repoPath);
+    this.#mustGetWorkspace(id);
+    return this.#mustGetRuntime(id).filesystem();
   }
 
   async ports(id) {
-    const ws = this.#mustGetWorkspace(id);
-    return derivePorts(ws.framework, ws.executionPlan);
+    this.#mustGetWorkspace(id);
+    return this.#mustGetRuntime(id).ports();
   }
 
   list() {
@@ -96,7 +142,11 @@ export class InMemoryWasmWorkspace {
   }
 
   async health(id) {
-    return this.#mustGetWorkspace(id).health;
+    const ws = this.#mustGetWorkspace(id);
+    const runtime = this.#mustGetRuntime(id);
+    ws.health = await runtime.health();
+    ws.status = ws.health;
+    return ws.health;
   }
 
   #mustGetWorkspace(id) {
@@ -107,10 +157,29 @@ export class InMemoryWasmWorkspace {
     return ws;
   }
 
-  #writeLog(id, line) {
-    const emitter = this.logsByWorkspace.get(id);
-    if (emitter) {
-      emitter.emit('log', `${new Date().toISOString()} ${line}`);
+  #mustGetRuntime(id) {
+    const runtime = this.runtimeInstances.get(id);
+    if (!runtime) {
+      throw new Error(`Runtime not found for workspace: ${id}`);
+    }
+    return runtime;
+  }
+
+  #recordEvent(id, type, payload = {}) {
+    const events = this.workspaceEvents.get(id);
+    if (!events) {
+      return;
+    }
+
+    const event = {
+      type,
+      timestamp: new Date().toISOString(),
+      ...payload
+    };
+
+    events.push(event);
+    if (events.length > 500) {
+      events.shift();
     }
   }
 }

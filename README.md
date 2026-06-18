@@ -9,7 +9,7 @@ A Gitpod-compatible WebAssembly workspace execution foundation that launches rep
 - Framework detection and execution-plan generation.
 - Sandboxed virtual filesystem wrapper.
 - Port and virtual networking metadata layer.
-- Runtime provider model with pluggable runtime candidates (Wasmtime/Wasmer/WAMR/JCO/WASI P2/component model).
+- Real process-backed Wasmtime runtime provider with lifecycle, health, logs, and port discovery.
 - REST API server.
 - Example CLI.
 - End-to-end-style integration tests for lifecycle and detection behavior.
@@ -22,8 +22,11 @@ interface WasmWorkspace {
   stop(id: string): Promise<void>;
   restart(id: string): Promise<Workspace>;
   logs(id: string): AsyncIterable<string>;
-  filesystem(id: string): FileSystem;
+  getLogs(id: string, limit?: number): string[];
+  events(id: string): Promise<WorkspaceEvent[]>;
+  filesystem(id: string): Promise<FileSystem>;
   ports(id: string): Promise<PortInfo[]>;
+  health(id: string): Promise<WorkspaceHealth>;
 }
 ```
 
@@ -44,7 +47,5 @@ npm run start:cli -- launch https://github.com/user/project.git
 - `POST /workspaces/:id/restart`
 - `GET /workspaces/:id/ports`
 - `GET /workspaces/:id/health`
-
-## Notes
-
-This project is a production-grade starter foundation focused on architecture and integration surfaces. Runtime execution is modeled for WASI-compatible providers and can be expanded with concrete runtime adapters.
+- `GET /workspaces/:id/logs`
+- `GET /workspaces/:id/events`

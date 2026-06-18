@@ -29,7 +29,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const match = req.url?.match(/^\/workspaces\/([^/]+)(?:\/(stop|restart|ports|health))?$/);
+    const match = req.url?.match(/^\/workspaces\/([^/]+)(?:\/(stop|restart|ports|health|logs|events))?$/);
     if (match) {
       const [, id, action] = match;
 
@@ -64,6 +64,17 @@ const server = http.createServer(async (req, res) => {
       if (action === 'health' && req.method === 'GET') {
         const health = await workspace.health(id);
         json(res, 200, { health });
+        return;
+      }
+
+      if (action === 'logs' && req.method === 'GET') {
+        json(res, 200, workspace.getLogs(id));
+        return;
+      }
+
+      if (action === 'events' && req.method === 'GET') {
+        const events = await workspace.events(id);
+        json(res, 200, events);
         return;
       }
     }
