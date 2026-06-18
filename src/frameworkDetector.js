@@ -79,7 +79,7 @@ export function generateExecutionPlan(framework) {
     rust: { build: 'cargo build --release', start: './target/release/app', defaultPort: 8080 },
     go: { build: 'go build ./...', start: 'go run .', defaultPort: 8080 },
     python: { build: 'python -m compileall .', start: 'python app.py', defaultPort: 8000 },
-    node: { build: 'npm run build --if-present', start: 'npm start', defaultPort: 3000 },
+    node: { build: 'npm run build --if-present', start: 'npm run start', defaultPort: 3000 },
     static: { build: 'none', start: 'serve static assets', defaultPort: 8080 }
   };
 

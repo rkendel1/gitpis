@@ -162,6 +162,18 @@ async function createDependencyHash(workspacePath) {
   return hash.digest('hex');
 }
 
+async function isLockfileAwareInstall(packageManager, workspacePath, topLevelFiles = []) {
+  if (packageManager !== PackageManager.Npm) {
+    return true;
+  }
+
+  if (topLevelFiles.includes('package-lock.json')) {
+    return true;
+  }
+
+  return fileExists(path.join(workspacePath, 'package-lock.json'));
+}
+
 function createLaunchFailure(stage, error, logs = []) {
   return {
     stage,
@@ -259,7 +271,7 @@ class LocalDependencyCache {
 
 class NodeDependencyInstaller {
   async install(workspace) {
-    const lockfileAware = workspace.packageManager !== PackageManager.Npm || await fileExists(path.join(workspace.path, 'package-lock.json'));
+    const lockfileAware = await isLockfileAwareInstall(workspace.packageManager, workspace.path, workspace.topLevelFiles ?? []);
     const installCommand = installCommandFor(workspace.packageManager, lockfileAware);
     const hash = await createDependencyHash(workspace.path);
     const cached = await workspace.cache.get(hash);
@@ -635,7 +647,7 @@ export class NodeRuntimeProvider {
     const profile = FRAMEWORK_PROFILES[repository.framework] ?? FRAMEWORK_PROFILES.node;
     const hasBuildScript = Boolean(scripts.build);
     const hasStartScript = Boolean(scripts[profile.start]);
-    const lockfileAware = packageManager !== PackageManager.Npm || repository.topLevelFiles?.includes('package-lock.json');
+    const lockfileAware = await isLockfileAwareInstall(packageManager, repository.path, repository.topLevelFiles ?? []);
     const environment = {
       ...this.environmentProvider.get(repository.workspaceId),
       PORT: String(repository.executionPlan?.defaultPort ?? profile.defaultPort)
@@ -689,6 +701,7 @@ export function evaluateNodeRuntimeCandidates() {
     compatibilityGaps: ['Native addons requiring host ABI/toolchain', 'Incomplete Worker/inspector parity in some runtimes'],
     productionReadiness: 'viable-with-guardrails',
     benchmarkData: {
+      source: 'Synthetic compatibility harness baseline from local representative framework samples',
       coldStartSeconds: 22.4,
       warmStartSeconds: 4.1,
       installSuccessRate: 0.92,
